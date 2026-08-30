@@ -1,6 +1,6 @@
 [package]
 name = "graffy-providers"
-description = "Provider layer: rig-core-backed access to Anthropic, OpenAI (and compatibles), and Ollama, with capability metadata for smart routing."
+description = "Provider layer: rig-core-backed access to Anthropic, OpenAI, Ollama, Venice, and OpenRouter, with tier bindings for smart routing."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,4 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+graffy-core.workspace = true
+async-trait.workspace = true
 rig-core.workspace = true
+tracing.workspace = true

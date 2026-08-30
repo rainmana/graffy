@@ -4,10 +4,11 @@
 //!   shareable durable objects).
 //! * [`graph`] — compilation into a petgraph topology with cycle-guard
 //!   validation (unguarded cycles are unlawful).
-//! * [`exec`] — the single-process executor (Phase 1 M2): tokio-driven,
-//!   graph-flow-patterned step loop, protobuf payloads, journaled everything.
+//! * [`exec`] — the single-process, tokio-driven executor: steps active
+//!   node pipelines, evaluates TOML guard conditions, enforces budgets and
+//!   per-node visit caps, and commits every observable to the journal.
 //! * [`journal`] — append-only run journal (length-delimited
-//!   `graffy.journal.v1.RunEvent` frames).
+//!   `graffy.journal.v1.RunEvent` frames) with reader + reference fold.
 //! * [`id`] — ULID-backed identifiers for every durable object.
 
 pub mod error;

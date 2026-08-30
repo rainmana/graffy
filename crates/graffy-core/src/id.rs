@@ -11,7 +11,7 @@ macro_rules! id_type {
         impl $name {
             /// Generate a fresh, time-sortable id.
             pub fn generate() -> Self {
-                Self(format!(concat!($prefix, "_{}"), ulid::Ulid::new()))
+                Self(format!(concat!($prefix, "_{}"), ulid::Ulid::generate()))
             }
         }
 

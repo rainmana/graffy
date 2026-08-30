@@ -31,11 +31,18 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
 
 # --- ecosystem reuse (ADR-0005) ---
-rig-core = "0.42"        # providers: Anthropic, OpenAI(+compatible), Ollama — MIT
+# rig-core 0.42 defaults to rustls — no system OpenSSL in graffy's own path.
+# NOTE: the library target is named `rig_core` (not `rig`).
+rig-core = "0.42"        # Anthropic, OpenAI, Ollama, Venice, OpenRouter — MIT
+# rigs 0.0.8 pins rig-core 0.11 (native-tls era) — a second, API-incompatible
+# rig that drags openssl-sys. Feature-gated OFF by default in graffy-agents
+# until upstream tracks modern rig (ADR-0005 "Risks").
 rigs = "0.0.8"           # multi-agent orchestration on top of rig — MIT
 
 # --- storage (ADR-0006) ---
-libsql = "0.9"           # embedded libSQL with native vector search — MIT
+# Embedded-only for Phase 1: libsql default features drag replication/remote/
+# sync (tonic + TLS stack) that ADR-0006 explicitly defers to a later opt-in.
+libsql = { version = "0.9", default-features = false, features = ["core"] }
 
 # --- runtime & plumbing ---
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "signal"] }
@@ -48,6 +55,7 @@ clap = { version = "4.6", features = ["derive"] }
 ulid = "3.0"
 async-trait = "0.1"
 directories = "6.0"
+sha2 = "0.10"            # spec + evidence content hashing (journal provenance)
 
 # --- terminal UI (ADR-0002) ---
 ratatui = "0.30"
@@ -72,6 +80,7 @@ authors.workspace = true
 [dependencies]
 graffy-core.workspace = true
 graffy-proto.workspace = true
+graffy-providers.workspace = true
 graffy-tui.workspace = true
 anyhow.workspace = true
 clap.workspace = true

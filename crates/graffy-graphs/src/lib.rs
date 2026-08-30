@@ -22,7 +22,10 @@ mod tests {
             .expect("default conversation TOML must parse");
         assert_eq!(spec.graph.id, "graffy.builtin.conversation");
         assert!(spec.nodes.len() >= 5, "floor graph has at least 5 stages");
-        assert_eq!(spec.policy.routing.on_quality_fail.as_deref(), Some("escalate"));
+        assert_eq!(
+            spec.policy.routing.on_quality_fail.as_deref(),
+            Some("escalate")
+        );
 
         let compiled = graffy_core::graph::CompiledGraph::compile(&spec)
             .expect("default conversation graph must compile (its cycle is guarded)");

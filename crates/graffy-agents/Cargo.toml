@@ -1,11 +1,18 @@
 [package]
 name = "graffy-agents"
-description = "Multi-agent conversation nodes for graffy graphs, orchestrated via the rigs crate."
+description = "Multi-agent conversation nodes for graffy graphs (rigs-backed orchestration behind a feature gate)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+# rigs 0.0.8 pins rig-core 0.11 — a second, API-incompatible rig that drags
+# openssl-sys into every build. Off by default until upstream tracks modern
+# rig; the conversation-node kind is independent of this gate (ADR-0005).
+rigs-backend = ["dep:rigs"]
+
 [dependencies]
-rigs.workspace = true
+rigs = { workspace = true, optional = true }

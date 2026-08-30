@@ -16,6 +16,8 @@
 /// render loop stays non-blocking while the executor streams tokens and IUs.
 pub async fn run_placeholder() -> anyhow::Result<()> {
     println!("graffy tui — the live graph view lands in Phase 1 (see docs/ROADMAP.md).");
-    println!("try: graffy run graphs/conversation.default.toml   (spec parser + cycle-guard compiler are live)");
+    println!(
+        "try: graffy run graphs/conversation.default.toml   (spec parser + cycle-guard compiler are live)"
+    );
     Ok(())
 }
