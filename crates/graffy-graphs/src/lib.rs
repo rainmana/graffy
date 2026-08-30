@@ -1,34 +1,117 @@
 //! Built-in graph library.
 //!
-//! Ships as TOML specs (same format users share) so built-ins are not
-//! privileged: you can export, diff, and fork them like any other graph.
+//! Ships as TOML specs (the same format users share) so built-ins are not
+//! privileged: export, diff, and fork them like any other graph. All are
+//! also present under `graphs/` in the repo.
 //!
-//! Phase 1 seeds: the default conversation floor graph plus two
-//! Clear-Thought-derived reasoning templates (sequential thinking, decision
-//! framework). Phase 2 expands the catalog (mental models, OODA, Ulysses,
-//! collaborative reasoning, …) and adds the skill-adoption flows
-//! (auto / guided / collaborative).
+//! Reasoning templates follow the Clear-Thought MCP server lineage (MIT —
+//! see NOTICE.md), re-expressed as graffy graphs with critique gates and
+//! guarded revision loops. Phase 2 expands the catalog (mental models, OODA,
+//! Ulysses protocol, collaborative reasoning, …) and adds the skill-adoption
+//! flows (auto / guided / collaborative).
 
-/// The default conversation graph — the floor every plain chat runs on.
-/// Also shipped at `graphs/conversation.default.toml` in the repo.
+/// The default conversation floor graph — what plain chat runs on.
 pub const DEFAULT_CONVERSATION_TOML: &str =
     include_str!("../../../graphs/conversation.default.toml");
 
+/// Sequential Thinking: plan → think → critique (guarded revise loop) → synthesize.
+pub const SEQUENTIAL_THINKING_TOML: &str =
+    include_str!("../../../graphs/reasoning.sequential-thinking.toml");
+
+/// Decision Framework: frame → evaluate → challenge (guarded loop) → decide.
+pub const DECISION_FRAMEWORK_TOML: &str =
+    include_str!("../../../graphs/reasoning.decision-framework.toml");
+
+/// Every built-in spec shipped with this build, `(id, toml)`.
+pub fn builtin_specs() -> [(&'static str, &'static str); 3] {
+    [
+        ("graffy.builtin.conversation", DEFAULT_CONVERSATION_TOML),
+        (
+            "graffy.builtin.reasoning.sequential-thinking",
+            SEQUENTIAL_THINKING_TOML,
+        ),
+        (
+            "graffy.builtin.reasoning.decision-framework",
+            DECISION_FRAMEWORK_TOML,
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn default_conversation_spec_parses_and_compiles() {
-        let spec = graffy_core::spec::GraphSpec::from_toml_str(super::DEFAULT_CONVERSATION_TOML)
-            .expect("default conversation TOML must parse");
-        assert_eq!(spec.graph.id, "graffy.builtin.conversation");
-        assert!(spec.nodes.len() >= 5, "floor graph has at least 5 stages");
-        assert_eq!(
-            spec.policy.routing.on_quality_fail.as_deref(),
-            Some("escalate")
-        );
+    use graffy_core::exec::{AutoApprove, Executor, OfflineEcho, RunInput};
+    use graffy_core::graph::CompiledGraph;
+    use graffy_core::journal::{JournalReader, summarize, wire};
+    use graffy_core::spec::GraphSpec;
 
-        let compiled = graffy_core::graph::CompiledGraph::compile(&spec)
-            .expect("default conversation graph must compile (its cycle is guarded)");
-        assert_eq!(compiled.topology.node_count(), spec.nodes.len());
+    #[test]
+    fn every_builtin_parses_compiles_and_matches_its_declared_id() {
+        for (id, toml) in super::builtin_specs() {
+            let spec = GraphSpec::from_toml_str(toml)
+                .unwrap_or_else(|e| panic!("builtin '{id}' must parse: {e}"));
+            assert_eq!(spec.graph.id, id);
+            let compiled = CompiledGraph::compile(&spec)
+                .unwrap_or_else(|e| panic!("builtin '{id}' must compile: {e}"));
+            assert_eq!(compiled.node_count(), spec.nodes.len());
+            assert_eq!(
+                spec.policy.routing.on_quality_fail.as_deref(),
+                Some("escalate"),
+                "builtin '{id}' must escalate on quality failure"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sequential_thinking_executes_offline_end_to_end() {
+        let spec = GraphSpec::from_toml_str(super::SEQUENTIAL_THINKING_TOML).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "graffy-graphs-test-{}",
+            graffy_core::id::RunId::generate()
+        ));
+        let outcome = Executor::default()
+            .run(
+                &spec,
+                super::SEQUENTIAL_THINKING_TOML,
+                RunInput {
+                    prompt: "How should I structure a falsifiable experiment?".into(),
+                    session_id: None,
+                },
+                &path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await
+            .expect("sequential thinking must run offline");
+        assert_eq!(outcome.status, wire::RunStatus::Succeeded);
+        let summary = summarize(&JournalReader::read_all(&path).unwrap());
+        // plan + think + synthesize drafts, critique verify — 4 model calls.
+        assert!(summary.model_calls >= 4, "got {}", summary.model_calls);
+        assert!(summary.iu_count >= 5);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn decision_framework_executes_offline_end_to_end() {
+        let spec = GraphSpec::from_toml_str(super::DECISION_FRAMEWORK_TOML).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "graffy-graphs-test-{}",
+            graffy_core::id::RunId::generate()
+        ));
+        let outcome = Executor::default()
+            .run(
+                &spec,
+                super::DECISION_FRAMEWORK_TOML,
+                RunInput {
+                    prompt: "Pick a serialization format for run journals.".into(),
+                    session_id: None,
+                },
+                &path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await
+            .expect("decision framework must run offline");
+        assert_eq!(outcome.status, wire::RunStatus::Succeeded);
+        std::fs::remove_file(&path).ok();
     }
 }

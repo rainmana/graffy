@@ -36,8 +36,17 @@ happened in between is a vibe. graffy takes the opposite bet:
 ## Quick taste
 
 ```console
-$ cargo run -- run graphs/conversation.default.toml
-parsed + compiled graph 'Default Conversation' v0.1.0 — 5 nodes / 5 edges (cycle guards verified)
+$ cargo run -- run graphs/conversation.default.toml --prompt "hello" --offline --tui
+```
+
+…and watch the pipeline light up node by node — intake, ground, draft, verify, respond —
+with a live journal feed, an MCW counter strip, and a plain-language line explaining each
+step. `Tab` opens the step inspector (every IU, evidence artifact, model call, and routing
+decision, straight from the journal). Afterwards:
+
+```console
+$ cargo run -- replay graffy-runs/<run>.journal --tui   # inspect any past run
+$ cargo run -- run graphs/reasoning.sequential-thinking.toml --prompt "…" --offline
 ```
 
 That TOML file *is* a durable graph object — read it, diff it, commit it, send it to a friend.
@@ -50,7 +59,11 @@ That TOML file *is* a durable graph object — read it, diff it, commit it, send
 | MCW protobuf schema (`src/protos/mcw.proto`) | ✅ IUs, 6 failure modes, 5 repair ops, H/R/D/M |
 | Run journal schema (`src/protos/journal.proto`) | ✅ append-only, replayable |
 | TOML graph specs + cycle-guard compiler | ✅ parsing + validation |
-| Executor, providers (rig), live Ratatui view | 🚧 Phase 1 |
+| Executor: guarded cycles, budgets, escalation routing (M2) | ✅ tested |
+| Providers via rig: Anthropic, OpenAI, Ollama, Venice, OpenRouter (M2) | ✅ tier bindings |
+| Live Ratatui run view + step inspector + novice mode (M3) | ✅ `--tui` |
+| Reasoning templates: sequential thinking, decision framework | ✅ `graphs/` |
+| libSQL persistence + registry (M4), graph export/import (M5) | 🚧 Phase 1 |
 | MCP tools-as-nodes, skill → graph conversion | 🔜 Phase 2 |
 | libSQL memory (vectors, temporal KG), MCW detectors live | 🔜 Phase 3 |
 | Benchmarks, surveys, shareable eval bundles | 🔜 Phase 4 |

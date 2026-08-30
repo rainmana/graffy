@@ -1031,6 +1031,7 @@ dependencies = [
  "clap",
  "directories",
  "graffy-core",
+ "graffy-graphs",
  "graffy-proto",
  "graffy-providers",
  "graffy-tui",
@@ -1071,6 +1072,7 @@ name = "graffy-graphs"
 version = "0.1.0-alpha.0"
 dependencies = [
  "graffy-core",
+ "tokio",
 ]
 
 [[package]]
@@ -1116,8 +1118,10 @@ name = "graffy-tui"
 version = "0.1.0-alpha.0"
 dependencies = [
  "anyhow",
- "crossterm",
+ "graffy-core",
+ "graffy-proto",
  "ratatui",
+ "tokio",
 ]
 
 [[package]]

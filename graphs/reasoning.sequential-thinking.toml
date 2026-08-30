@@ -1,0 +1,104 @@
+# graffy built-in reasoning graph — Sequential Thinking.
+# Pattern lineage: the Clear-Thought MCP server family (MIT; see NOTICE.md),
+# re-expressed as a durable graffy graph: plan -> think -> critique (guarded
+# revise loop) -> synthesize, with the same evidence discipline as every
+# other graph. Fork it: it is data, not code.
+
+[graph]
+id = "graffy.builtin.reasoning.sequential-thinking"
+name = "Sequential Thinking"
+version = "0.1.0"
+description = "Structured step-by-step reasoning with a critique gate and guarded revision loop."
+license = "GPL-3.0-or-later"
+authors = ["graffy built-ins"]
+tags = ["builtin", "reasoning", "clear-thought"]
+
+[policy.evidence]
+mode = "strict"
+min_level = "L1"
+
+[policy.budget]
+max_tokens = 300000
+max_usd = 2.0
+max_seconds = 600
+
+[policy.routing]
+ladder = ["fast", "balanced", "frontier"]
+on_quality_fail = "escalate"
+
+[[node]]
+id = "intake"
+kind = "intake"
+description = "Decompose the request into Information Units."
+
+[[node]]
+id = "ground"
+kind = "research"
+description = "Collect evidence the reasoning will lean on."
+
+[[node]]
+id = "plan"
+kind = "model"
+model_tier = "fast"
+description = "Lay out the ordered reasoning steps before thinking begins."
+[node.params]
+system = "You are the planning node of a sequential-thinking graph. Decompose the goal into a short, ordered list of reasoning steps. Name assumptions explicitly; do not solve the problem yet."
+
+[[node]]
+id = "think"
+kind = "model"
+model_tier = "balanced"
+description = "Work the plan step by step, showing intermediate reasoning."
+[node.params]
+system = "You are the thinking node of a sequential-thinking graph. Execute the plan step by step. Mark each step, state what is established and what remains uncertain, and never assert beyond your evidence."
+
+[[node]]
+id = "critique"
+kind = "verify"
+model_tier = "balanced"
+description = "Judge the reasoning chain; failures escalate rather than bounce back."
+
+[[node]]
+id = "synthesize"
+kind = "model"
+model_tier = "balanced"
+description = "Fold the verified reasoning into a direct, complete answer."
+[node.params]
+system = "You are the synthesis node of a sequential-thinking graph. Turn the verified reasoning chain into a clear final answer. Preserve important distinctions and stated uncertainties; do not introduce new claims."
+
+[[node]]
+id = "respond"
+kind = "respond"
+description = "Deliver the synthesized answer."
+
+[[edge]]
+from = "intake"
+to = "ground"
+
+[[edge]]
+from = "ground"
+to = "plan"
+
+[[edge]]
+from = "plan"
+to = "think"
+
+[[edge]]
+from = "think"
+to = "critique"
+
+[[edge]]
+from = "critique"
+to = "synthesize"
+when = "verdict == 'pass'"
+
+[[edge]]
+# Guarded revision loop: critique failures re-enter thinking, escalated up
+# the routing ladder by the executor.
+from = "critique"
+to = "think"
+when = "verdict == 'revise'"
+
+[[edge]]
+from = "synthesize"
+to = "respond"

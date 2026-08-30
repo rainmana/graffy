@@ -6,8 +6,12 @@
 //! full MCW stream (IUs, failure signals, repairs, H/R/D/M, evidence).
 //!
 //! Writers assign a strictly increasing `seq` per run and flush every frame —
-//! a crash loses at most the frame being written. Readers replay by folding
-//! the stream; `summarize` is the reference fold used by the CLI and tests.
+//! a crash loses at most the frame being written. An optional **tap** mirrors
+//! every committed frame to an in-process channel; that tap is how the M3 TUI
+//! renders runs live without a second source of truth (the journal stays
+//! canonical — the tap receives exactly what was written).
+//!
+//! Readers replay by folding the stream; `summarize` is the reference fold.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -21,17 +25,30 @@ use crate::error::JournalError;
 pub use graffy_proto::journal::v1 as wire;
 use graffy_proto::journal::v1::run_event::Event;
 
+/// Mirrors committed frames to a live consumer (e.g. the TUI).
+pub type EventTap = tokio::sync::mpsc::UnboundedSender<wire::RunEvent>;
+
 /// Appends length-delimited `RunEvent` frames to a journal file.
 pub struct JournalWriter {
     out: BufWriter<File>,
     path: PathBuf,
     run_id: String,
     seq: u64,
+    tap: Option<EventTap>,
 }
 
 impl JournalWriter {
     /// Create (truncate) a journal at `path` for the given run.
     pub fn create(path: &Path, run_id: &str) -> Result<Self, JournalError> {
+        Self::create_with_tap(path, run_id, None)
+    }
+
+    /// Create a journal that also mirrors every committed frame to `tap`.
+    pub fn create_with_tap(
+        path: &Path,
+        run_id: &str,
+        tap: Option<EventTap>,
+    ) -> Result<Self, JournalError> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -47,6 +64,7 @@ impl JournalWriter {
             path: path.to_path_buf(),
             run_id: run_id.to_owned(),
             seq: 0,
+            tap,
         })
     }
 
@@ -62,6 +80,10 @@ impl JournalWriter {
         let bytes = frame.encode_length_delimited_to_vec();
         self.out.write_all(&bytes)?;
         self.out.flush()?;
+        if let Some(tap) = &self.tap {
+            // A closed tap must never fail the run — the journal is canonical.
+            let _ = tap.send(frame);
+        }
         Ok(self.seq)
     }
 
@@ -192,6 +214,32 @@ mod tests {
             summary.node_states.get("a"),
             Some(&wire::NodeState::Running)
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn tap_mirrors_exactly_what_was_written() {
+        let path = temp_journal_path("tap");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut w = JournalWriter::create_with_tap(&path, "run_TAP", Some(tx)).unwrap();
+        w.append(Event::RunStarted(wire::RunManifest {
+            run_id: "run_TAP".into(),
+            ..Default::default()
+        }))
+        .unwrap();
+        w.append(Event::RunFinished(wire::RunFinished {
+            status: wire::RunStatus::Succeeded as i32,
+            ..Default::default()
+        }))
+        .unwrap();
+        drop(w);
+
+        let mut tapped = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            tapped.push(frame);
+        }
+        let written = JournalReader::read_all(&path).unwrap();
+        assert_eq!(tapped, written, "tap must mirror the canonical journal");
         std::fs::remove_file(&path).ok();
     }
 }

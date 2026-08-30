@@ -1,6 +1,6 @@
 [package]
 name = "graffy-graphs"
-description = "Built-in graph library: the default conversation floor graph, Clear-Thought-derived reasoning templates, repair graphs, and compaction-by-graph."
+description = "Built-in graph library: the default conversation floor graph and Clear-Thought-derived reasoning templates."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,3 +11,4 @@ authors.workspace = true
 
 [dev-dependencies]
 graffy-core.workspace = true
+tokio.workspace = true

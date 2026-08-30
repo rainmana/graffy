@@ -1,0 +1,101 @@
+# graffy built-in reasoning graph — Decision Framework.
+# Pattern lineage: the Clear-Thought MCP server family (MIT; see NOTICE.md):
+# structured decision analysis with explicit options, criteria, weighted
+# evaluation, and a challenge gate before any recommendation.
+
+[graph]
+id = "graffy.builtin.reasoning.decision-framework"
+name = "Decision Framework"
+version = "0.1.0"
+description = "Options, criteria, weighted evaluation, and a challenged recommendation."
+license = "GPL-3.0-or-later"
+authors = ["graffy built-ins"]
+tags = ["builtin", "reasoning", "clear-thought", "decision"]
+
+[policy.evidence]
+mode = "strict"
+min_level = "L1"
+
+[policy.budget]
+max_tokens = 300000
+max_usd = 2.0
+max_seconds = 600
+
+[policy.routing]
+ladder = ["fast", "balanced", "frontier"]
+on_quality_fail = "escalate"
+
+[[node]]
+id = "intake"
+kind = "intake"
+description = "Capture the decision to be made and its constraints."
+
+[[node]]
+id = "ground"
+kind = "research"
+description = "Collect evidence bearing on the decision."
+
+[[node]]
+id = "frame"
+kind = "model"
+model_tier = "fast"
+description = "Enumerate the real options and the criteria that matter."
+[node.params]
+system = "You are the framing node of a decision-framework graph. Enumerate the genuine options (including do-nothing where honest) and the decision criteria with weights. Name constraints and stakeholders. Do not evaluate yet."
+
+[[node]]
+id = "evaluate"
+kind = "model"
+model_tier = "balanced"
+description = "Score each option against each criterion, with reasoning shown."
+[node.params]
+system = "You are the evaluation node of a decision-framework graph. Score every option against every criterion, show the reasoning per cell, surface risks and uncertainty explicitly, and keep scores separable from advocacy."
+
+[[node]]
+id = "challenge"
+kind = "verify"
+model_tier = "balanced"
+description = "Adversarial gate: attack the evaluation before any recommendation."
+
+[[node]]
+id = "decide"
+kind = "model"
+model_tier = "balanced"
+description = "Issue the recommendation with its rationale and residual risks."
+[node.params]
+system = "You are the deciding node of a decision-framework graph. Given the challenged evaluation, recommend one option. State why it wins, what would change your mind, and the residual risks the decider accepts."
+
+[[node]]
+id = "respond"
+kind = "respond"
+description = "Deliver the recommendation."
+
+[[edge]]
+from = "intake"
+to = "ground"
+
+[[edge]]
+from = "ground"
+to = "frame"
+
+[[edge]]
+from = "frame"
+to = "evaluate"
+
+[[edge]]
+from = "evaluate"
+to = "challenge"
+
+[[edge]]
+from = "challenge"
+to = "decide"
+when = "verdict == 'pass'"
+
+[[edge]]
+from = "challenge"
+to = "evaluate"
+when = "verdict == 'revise'"
+
+[[edge]]
+from = "decide"
+to = "respond"

@@ -756,6 +756,8 @@ pub struct Executor {
     pub registry: NodeRegistry,
     /// Runtime half of the cycle law: how many times a single node may run.
     pub max_node_visits: u32,
+    /// Optional live mirror of committed journal frames (the TUI's feed).
+    pub event_tap: Option<crate::journal::EventTap>,
 }
 
 impl Default for Executor {
@@ -763,6 +765,7 @@ impl Default for Executor {
         Self {
             registry: NodeRegistry::with_defaults(),
             max_node_visits: 3,
+            event_tap: None,
         }
     }
 }
@@ -801,7 +804,8 @@ impl Executor {
             .unwrap_or_else(|| SessionId::generate().to_string());
         let evidence_visible = spec.policy.evidence.mode != "trace-only";
 
-        let mut journal = JournalWriter::create(journal_path, &run_id)?;
+        let mut journal =
+            JournalWriter::create_with_tap(journal_path, &run_id, self.event_tap.clone())?;
         journal.append(Event::RunStarted(wire::RunManifest {
             run_id: run_id.clone(),
             graph_id: spec.graph.id.clone(),

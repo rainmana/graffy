@@ -4,6 +4,7 @@
 //! inspectable, durable, shareable agent graph. See docs/ARCHITECTURE.md.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
@@ -29,15 +30,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Launch the terminal UI (default when no subcommand is given).
+    /// Open the TUI journal browser (pick past runs to inspect).
     Tui,
     /// Execute a TOML graph spec against a prompt.
     Run {
-        /// Path to a TOML graph spec (see graphs/conversation.default.toml).
+        /// Path to a TOML graph spec (see graphs/).
         spec: PathBuf,
         /// User prompt handed to the graph's intake node.
         #[arg(long)]
         prompt: String,
+        /// Watch the run live in the TUI (node states, journal feed,
+        /// step inspector) instead of plain logs.
+        #[arg(long)]
+        tui: bool,
         /// Run against the deterministic offline echo invoker (no model,
         /// no network — for demos and engine testing; clearly labeled).
         #[arg(long)]
@@ -50,7 +55,10 @@ enum Command {
     Replay {
         /// Path to a .journal file produced by `graffy run`.
         journal: PathBuf,
-        /// Also list every event frame.
+        /// Open the TUI step inspector instead of printing a summary.
+        #[arg(long)]
+        tui: bool,
+        /// Also list every event frame (plain mode).
         #[arg(long)]
         events: bool,
     },
@@ -90,18 +98,35 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command.unwrap_or(Command::Tui) {
-        Command::Tui => graffy_tui::run_placeholder().await,
+        Command::Tui => graffy_tui::run_home(),
         Command::Run {
             spec,
             prompt,
+            tui,
             offline,
             journal,
-        } => run_graph(spec, prompt, offline, journal).await,
-        Command::Replay { journal, events } => replay(journal, events),
+        } => run_graph(spec, prompt, tui, offline, journal).await,
+        Command::Replay {
+            journal,
+            tui,
+            events,
+        } => {
+            if tui {
+                graffy_tui::run_replay(&journal)
+            } else {
+                replay(journal, events)
+            }
+        }
         Command::Graph { command } => {
             match command {
                 GraphCommand::List => {
-                    println!("graph registry lands with the Phase 1 libSQL store (M4).");
+                    println!("built-ins shipped with this binary:");
+                    for (id, _) in graffy_graphs_builtins() {
+                        println!("  {id}");
+                    }
+                    println!(
+                        "\nthe installed-graph registry lands with the Phase 1 libSQL store (M4)."
+                    );
                 }
                 GraphCommand::Export { id } => {
                     println!(
@@ -118,59 +143,71 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+fn graffy_graphs_builtins() -> [(&'static str, &'static str); 3] {
+    graffy_graphs::builtin_specs()
+}
+
+fn build_invoker(offline: bool) -> anyhow::Result<Arc<dyn ModelInvoker>> {
+    if offline {
+        println!("mode: OFFLINE ECHO — deterministic, no real model is consulted\n");
+        return Ok(Arc::new(OfflineEcho));
+    }
+    match RigInvoker::from_env() {
+        Ok(invoker) => {
+            for (tier, target) in invoker.bound_tiers() {
+                println!("tier {tier:<10} -> {target}");
+            }
+            println!();
+            Ok(Arc::new(invoker))
+        }
+        Err(err) => {
+            eprintln!("cannot start a live run: {err}");
+            eprintln!("hint: `graffy run --offline …` exercises the engine without a model.");
+            std::process::exit(2);
+        }
+    }
+}
+
 async fn run_graph(
     spec_path: PathBuf,
     prompt: String,
+    tui: bool,
     offline: bool,
     journal: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let spec_text = std::fs::read_to_string(&spec_path)?;
     let spec = GraphSpec::from_toml_str(&spec_text)?;
-
     let journal_path = journal.unwrap_or_else(|| {
         PathBuf::from("graffy-runs").join(format!("{}.journal", ulid_like_stamp()))
     });
+    let invoker = build_invoker(offline)?;
 
-    let offline_invoker = OfflineEcho;
-    let rig_invoker;
-    let invoker: &dyn ModelInvoker = if offline {
-        println!("mode: OFFLINE ECHO — deterministic, no real model is consulted\n");
-        &offline_invoker
+    let outcome = if tui {
+        let Some(outcome) =
+            graffy_tui::run_live(spec, spec_text, prompt, journal_path.clone(), invoker).await?
+        else {
+            std::process::exit(1);
+        };
+        outcome
     } else {
-        match RigInvoker::from_env() {
-            Ok(invoker) => {
-                rig_invoker = invoker;
-                for (tier, target) in rig_invoker.bound_tiers() {
-                    println!("tier {tier:<10} -> {target}");
-                }
-                println!();
-                &rig_invoker
-            }
-            Err(err) => {
-                eprintln!("cannot start a live run: {err}");
-                eprintln!("hint: `graffy run --offline …` exercises the engine without a model.");
-                std::process::exit(2);
-            }
-        }
+        println!(
+            "graph '{}' v{} — executing (every step journaled)",
+            spec.graph.name, spec.graph.version
+        );
+        Executor::default()
+            .run(
+                &spec,
+                &spec_text,
+                RunInput {
+                    prompt,
+                    session_id: None,
+                },
+                &journal_path,
+                invoker.as_ref(),
+                &AutoApprove,
+            )
+            .await?
     };
-
-    println!(
-        "graph '{}' v{} — executing (every step journaled)",
-        spec.graph.name, spec.graph.version
-    );
-    let outcome = Executor::default()
-        .run(
-            &spec,
-            &spec_text,
-            RunInput {
-                prompt,
-                session_id: None,
-            },
-            &journal_path,
-            invoker,
-            &AutoApprove,
-        )
-        .await?;
 
     println!("\nrun     : {}", outcome.run_id);
     println!("status  : {:?}", outcome.status);
@@ -182,7 +219,10 @@ async fn run_graph(
         println!("note    : {note}");
     }
     println!("journal : {}", outcome.journal_path.display());
-    println!("replay  : graffy replay {}", outcome.journal_path.display());
+    println!(
+        "inspect : graffy replay {} --tui",
+        outcome.journal_path.display()
+    );
     if let Some(text) = outcome.final_text {
         println!("\n================ verified response ================\n{text}");
     }
@@ -221,6 +261,7 @@ fn replay(journal: PathBuf, list_events: bool) -> anyhow::Result<()> {
             println!("  #{:<4} {}", frame.seq, event_name(frame));
         }
     }
+    println!("\ntip: graffy replay {} --tui", journal.display());
     Ok(())
 }
 
@@ -255,6 +296,7 @@ fn doctor() -> anyhow::Result<()> {
         println!("config dir: {}", dirs.config_dir().display());
         println!("data dir  : {}", dirs.data_dir().display());
     }
+    println!("\nbuilt-in graphs: {}", graffy_graphs_builtins().len());
     println!("\ntier bindings (GRAFFY_MODEL_*):");
     let bindings = graffy_providers::bindings_from_env();
     if bindings.is_empty() {
