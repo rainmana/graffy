@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "graffy"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1046,14 +1046,14 @@ dependencies = [
 
 [[package]]
 name = "graffy-agents"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "rigs",
 ]
 
 [[package]]
 name = "graffy-core"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "async-trait",
  "graffy-proto",
@@ -1069,11 +1069,11 @@ dependencies = [
 
 [[package]]
 name = "graffy-evals"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 
 [[package]]
 name = "graffy-graphs"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "async-trait",
  "graffy-core",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "graffy-mcp"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "async-trait",
  "graffy-core",
@@ -1098,14 +1098,14 @@ dependencies = [
 
 [[package]]
 name = "graffy-mcw"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "graffy-proto",
 ]
 
 [[package]]
 name = "graffy-memory"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "graffy-core",
  "graffy-graphs",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "graffy-proto"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "prost",
  "prost-build",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "graffy-providers"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "async-trait",
  "graffy-core",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "graffy-tui"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-trait",

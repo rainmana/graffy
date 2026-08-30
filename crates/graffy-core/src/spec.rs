@@ -130,6 +130,31 @@ pub struct RoutingPolicy {
     pub on_quality_fail: Option<String>,
 }
 
+impl PolicySpec {
+    /// The standard policy for generated graphs (facades, graphified skills
+    /// and prompts): the full routing ladder with escalate-on-quality-fail,
+    /// and sane budgets. Without a ladder, escalation has nowhere to climb —
+    /// found the hard way in a field-run TOML with `ladder = []`.
+    pub fn standard() -> Self {
+        Self {
+            evidence: EvidencePolicy::default(),
+            budget: BudgetPolicy {
+                max_tokens: Some(200_000),
+                max_usd: Some(1.0),
+                max_seconds: Some(300),
+            },
+            routing: RoutingPolicy {
+                ladder: vec![
+                    "fast".to_owned(),
+                    "balanced".to_owned(),
+                    "frontier".to_owned(),
+                ],
+                on_quality_fail: Some("escalate".to_owned()),
+            },
+        }
+    }
+}
+
 impl GraphSpec {
     /// Parse a spec from TOML text.
     pub fn from_toml_str(input: &str) -> Result<Self, SpecError> {

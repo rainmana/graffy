@@ -504,7 +504,7 @@ pub fn generate_facade(
         },
         nodes,
         edges,
-        policy: PolicySpec::default(),
+        policy: PolicySpec::standard(),
     }
 }
 
@@ -540,6 +540,10 @@ mod tests {
     fn evidence_facade_compiles_without_a_gate() {
         let spec = generate_facade("srv", &tool(Some(true), None), "evidence", "L2", None);
         assert_eq!(spec.graph.id, "graffy.mcp.srv.echo-tool");
+        assert!(
+            !spec.policy.routing.ladder.is_empty(),
+            "facades must carry a routing ladder"
+        );
         assert!(!spec.nodes.iter().any(|n| n.kind == "approval"));
         let toml_text = spec.to_toml_string().unwrap();
         let reparsed = GraphSpec::from_toml_str(&toml_text).unwrap();

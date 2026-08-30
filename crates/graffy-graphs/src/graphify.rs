@@ -127,6 +127,7 @@ fn conversation_floor(
     description: String,
     tags: Vec<String>,
     apply_system: String,
+    mode_label: &str,
 ) -> GraphSpec {
     let mut apply_params = toml::Table::new();
     apply_params.insert("system".into(), param(&apply_system));
@@ -138,7 +139,7 @@ fn conversation_floor(
             version: "0.1.0".into(),
             description,
             license: Some("GPL-3.0-or-later".into()),
-            authors: vec!["graphified by graffy (auto-adopt)".into()],
+            authors: vec![format!("graphified by graffy ({mode_label})")],
             tags,
         },
         nodes: vec![
@@ -205,12 +206,14 @@ fn conversation_floor(
                 when: Some("verdict == 'revise'".into()),
             },
         ],
-        policy: PolicySpec::default(),
+        policy: PolicySpec::standard(),
     }
 }
 
-/// Auto-adopt a skill document into a durable graph.
-pub fn graphify_skill(doc: &SkillDoc) -> GraphSpec {
+/// Graphify a skill document into a durable graph on the verified floor.
+/// `mode_label` records which involvement tier produced it ("auto",
+/// "guided", "collaborative") — the artifact must not lie about its origin.
+pub fn graphify_skill(doc: &SkillDoc, mode_label: &str) -> GraphSpec {
     let slug = sanitize(&doc.name);
     let apply_system = format!(
         "You are executing the imported skill '{}' inside a graffy graph. The skill's own \
@@ -226,13 +229,22 @@ pub fn graphify_skill(doc: &SkillDoc) -> GraphSpec {
         } else {
             doc.description.clone()
         },
-        vec!["skill-import".into(), "graphified".into(), "auto".into()],
+        vec![
+            "skill-import".into(),
+            "graphified".into(),
+            mode_label.to_owned(),
+        ],
         apply_system,
+        mode_label,
     )
 }
 
-/// Auto-adopt a raw prompt into a durable graph.
-pub fn graphify_prompt(name: &str, prompt_text: &str) -> Result<GraphSpec, GraphifyError> {
+/// Graphify a raw prompt into a durable graph on the verified floor.
+pub fn graphify_prompt(
+    name: &str,
+    prompt_text: &str,
+    mode_label: &str,
+) -> Result<GraphSpec, GraphifyError> {
     let text = prompt_text.trim();
     if text.is_empty() {
         return Err(GraphifyError::Empty);
@@ -247,8 +259,13 @@ pub fn graphify_prompt(name: &str, prompt_text: &str) -> Result<GraphSpec, Graph
         format!("graffy.prompt.{slug}"),
         name.to_owned(),
         format!("Graphified prompt '{name}' (auto-adopt)."),
-        vec!["prompt-import".into(), "graphified".into(), "auto".into()],
+        vec![
+            "prompt-import".into(),
+            "graphified".into(),
+            mode_label.to_owned(),
+        ],
         apply_system,
+        mode_label,
     ))
 }
 
@@ -289,11 +306,25 @@ intent; quote the notes for every factual claim.
     #[test]
     fn graphified_skill_compiles_and_carries_the_skill_text() {
         let doc = parse_skill_md(SKILL_WITH_FRONTMATTER, "fallback").unwrap();
-        let spec = graphify_skill(&doc);
+        let spec = graphify_skill(&doc, "collaborative");
         assert_eq!(spec.graph.id, "graffy.skill.incident-postmortem-writer");
+        assert_eq!(
+            spec.graph.authors,
+            vec!["graphified by graffy (collaborative)".to_owned()],
+            "the artifact must record which involvement tier produced it"
+        );
         let toml_text = spec.to_toml_string().unwrap();
         let reparsed = graffy_core::spec::GraphSpec::from_toml_str(&toml_text).unwrap();
         CompiledGraph::compile(&reparsed).expect("graphified skill must compile");
+        assert!(
+            !reparsed.policy.routing.ladder.is_empty(),
+            "generated graphs must carry a routing ladder or escalation cannot climb"
+        );
+        assert_eq!(
+            reparsed.policy.routing.on_quality_fail.as_deref(),
+            Some("escalate")
+        );
+        assert!(reparsed.policy.budget.max_tokens.is_some());
         let apply = reparsed.nodes.iter().find(|n| n.id == "apply").unwrap();
         let system = apply.params.get("system").and_then(|v| v.as_str()).unwrap();
         assert!(
@@ -304,12 +335,13 @@ intent; quote the notes for every factual claim.
 
     #[test]
     fn graphified_prompt_compiles() {
-        let spec = graphify_prompt("Daily Standup", "Summarize my day as a standup.").unwrap();
+        let spec =
+            graphify_prompt("Daily Standup", "Summarize my day as a standup.", "auto").unwrap();
         assert_eq!(spec.graph.id, "graffy.prompt.daily-standup");
         let reparsed =
             graffy_core::spec::GraphSpec::from_toml_str(&spec.to_toml_string().unwrap()).unwrap();
         CompiledGraph::compile(&reparsed).expect("graphified prompt must compile");
-        assert!(graphify_prompt("x", "   ").is_err());
+        assert!(graphify_prompt("x", "   ", "auto").is_err());
     }
 
     #[test]

@@ -57,6 +57,10 @@ struct ReviewState {
     buffer: String,
     error: Option<String>,
     dirty: bool,
+    /// Node indices touched by an edit — rendered with a marker.
+    edited_nodes: std::collections::HashSet<usize>,
+    /// Help overlay: shown on first open, reopened with '?'.
+    show_help: bool,
 }
 
 /// Open the review TUI. Guided allows rename only; collaborative allows
@@ -69,6 +73,8 @@ pub fn review_spec(spec: &mut GraphSpec, collaborative: bool) -> Result<ReviewDe
         buffer: String::new(),
         error: None,
         dirty: false,
+        edited_nodes: std::collections::HashSet::new(),
+        show_help: true,
     };
     state.list.select(Some(0));
 
@@ -90,6 +96,11 @@ fn review_loop(
             && let TermEvent::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            if state.show_help {
+                // Any key dismisses the overlay; the key itself is consumed.
+                state.show_help = false;
+                continue;
+            }
             if let Some(target) = state.editing {
                 match key.code {
                     KeyCode::Enter => {
@@ -98,6 +109,9 @@ fn review_loop(
                             match target {
                                 EditTarget::GraphName => spec.graph.name = value,
                                 EditTarget::NodeDescription => {
+                                    if let Some(ix) = state.list.selected() {
+                                        state.edited_nodes.insert(ix);
+                                    }
                                     if let Some(node) = selected_node_mut(spec, &state.list) {
                                         node.description = value;
                                     }
@@ -131,6 +145,7 @@ fn review_loop(
                     state.buffer = spec.graph.name.clone();
                     state.editing = Some(EditTarget::GraphName);
                 }
+                KeyCode::Char('?') => state.show_help = true,
                 KeyCode::Char('d') if collaborative => {
                     if let Some(node) = selected_node_mut(spec, &state.list) {
                         state.buffer = node.description.clone();
@@ -138,6 +153,9 @@ fn review_loop(
                     }
                 }
                 KeyCode::Char('t') if collaborative => {
+                    if let Some(ix) = state.list.selected() {
+                        state.edited_nodes.insert(ix);
+                    }
                     if let Some(node) = selected_node_mut(spec, &state.list) {
                         node.model_tier = next_tier(node.model_tier.as_deref());
                         state.dirty = true;
@@ -159,6 +177,9 @@ fn review_loop(
                         if let Some(edited) = edit_in_editor(terminal, &initial)?
                             && let Some(node) = selected_node_mut(spec, &state.list)
                         {
+                            if let Some(ix) = state.list.selected() {
+                                state.edited_nodes.insert(ix);
+                            }
                             node.params.insert(
                                 "system".to_owned(),
                                 toml::Value::String(edited.trim_end().to_owned()),
@@ -269,8 +290,18 @@ fn draw(f: &mut Frame, spec: &GraphSpec, collaborative: bool, state: &mut Review
     let items: Vec<ListItem> = spec
         .nodes
         .iter()
-        .map(|n| {
+        .enumerate()
+        .map(|(ix, n)| {
+            let marker = if state.edited_nodes.contains(&ix) {
+                "✎"
+            } else {
+                " "
+            };
             ListItem::new(Line::from(vec![
+                Span::styled(
+                    marker,
+                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!(" {:<12}", n.id), Style::new().fg(Color::Cyan)),
                 Span::styled(
                     format!(
@@ -387,6 +418,72 @@ fn draw(f: &mut Frame, spec: &GraphSpec, collaborative: bool, state: &mut Review
             .add_modifier(Modifier::ITALIC),
     ));
     f.render_widget(Paragraph::new(vec![footer_line, hint]), footer);
+
+    if state.show_help {
+        draw_help_overlay(f, collaborative);
+    }
+}
+
+fn draw_help_overlay(f: &mut Frame, collaborative: bool) {
+    use ratatui::widgets::Clear;
+    let area = f.area();
+    let width = area.width.clamp(20, 74);
+    let height = if collaborative { 14 } else { 10 };
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height.min(area.height))) / 2;
+    let rect = ratatui::layout::Rect {
+        x,
+        y,
+        width,
+        height: height.min(area.height),
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            if collaborative {
+                "collaborative review — you co-design, then you decide"
+            } else {
+                "guided review — you inspect, then you decide"
+            },
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("  ↑/↓        select a node        j/k   scroll detail"),
+        Line::from("  n          rename the graph (id stays stable)"),
+    ];
+    if collaborative {
+        lines.push(Line::from("  d          edit selected node's description"));
+        lines.push(Line::from(
+            "  t          cycle its tier: fast → balanced → frontier",
+        ));
+        lines.push(Line::from(
+            "  s          edit its system knowledge in $EDITOR",
+        ));
+        lines.push(Line::from(
+            "             (model nodes only — the apply node here)",
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "  a/Enter    accept — compiler checks, then registers",
+    ));
+    lines.push(Line::from("  r/q/Esc    reject — nothing is kept"));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  press any key to start · '?' shows this again",
+        Style::new().fg(Color::DarkGray),
+    )));
+
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" how this works ")
+                .border_style(Style::new().fg(Color::Yellow)),
+        ),
+        rect,
+    );
 }
 
 #[cfg(test)]

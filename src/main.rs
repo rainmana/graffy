@@ -596,11 +596,26 @@ async fn graphify_cmd(
             doc.name = name;
         }
         println!("graphifying skill '{}' ({mode:?})…", doc.name);
-        graphify::graphify_skill(&doc)
+        graphify::graphify_skill(
+            &doc,
+            match mode {
+                Mode::Auto => "auto",
+                Mode::Guided => "guided",
+                Mode::Collaborative => "collaborative",
+            },
+        )
     } else {
         let name = name_override.unwrap_or(fallback);
         println!("graphifying prompt '{name}' ({mode:?})…");
-        graphify::graphify_prompt(&name, &raw)?
+        graphify::graphify_prompt(
+            &name,
+            &raw,
+            match mode {
+                Mode::Auto => "auto",
+                Mode::Guided => "guided",
+                Mode::Collaborative => "collaborative",
+            },
+        )?
     };
 
     if mode != Mode::Auto {

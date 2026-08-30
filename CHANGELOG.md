@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.0-alpha.4 — the trilogy, portable everywhere (2026-08-30)
+
+- **All three graphification tiers**: `graffy graphify <path> --mode
+  auto|guided|collaborative`. Guided opens a review TUI (rename, accept,
+  reject — nothing persists until you accept; piped runs print the TOML and
+  ask, EOF rejects). Collaborative adds co-design: edit node descriptions
+  inline, cycle routing tiers, and open system knowledge in `$EDITOR`; the
+  cycle-guard compiler gates every accept. A help overlay now opens first
+  (`?` brings it back) and edited nodes carry a ✎ marker.
+- **Artifacts stop lying**: graphified specs record the actual involvement
+  tier in `authors` (a field-run TOML said "auto-adopt" for every mode).
+- **Escalation fix**: generated specs (graphified skills/prompts and MCP
+  facades) now carry the standard routing ladder, escalate-on-quality-fail,
+  and budget defaults — a field-run TOML shipped `ladder = []`, leaving
+  escalation nowhere to climb.
+- **Portable Linux binaries**: release builds are musl-static (x86_64 +
+  aarch64) — no glibc floor, runs on any distro — with a post-build smoke
+  step so no release ships an unbootable binary again. (alpha.3's gnu
+  binaries required glibc 2.38+.)
+- Known-issues log started (WSL TUI overlap observation, parked); ROADMAP
+  records Apple signing/notarization, brand-seed, and LangGraph-export ideas.
+
 ## v0.1.0-alpha.3 — the release that ships binaries (2026-08-30)
 
 Supersedes the alpha.2 tag, which was pushed from a clone carrying a stale
