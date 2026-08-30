@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased (v0.1.0-alpha.5)
+
+- **`graffy init` + a real home**: everything now lives in `~/.graffy` —
+  store at `~/.graffy/graffy.db`, journals in `~/.graffy/runs` — so the
+  binary works from any directory. `GRAFFY_HOME`/`GRAFFY_DATA_DIR` relocate
+  it; a pre-existing legacy platform-dir store keeps working (with a
+  migration nudge from `graffy init`), and `graffy metrics` still reads a
+  legacy `./graffy-runs` if that's where your journals are.
+- **`graffy metrics`**: first research-grade output — folds run journals
+  into per-run rows + an aggregate: outcomes, token totals, failure-mode
+  frequencies (from the C1 detectors), repair counts and token costs,
+  evidence-level distribution, escalation efficacy (success rate with vs
+  without ladder escalation), convergence (visit-cap hits, mean escalations
+  per run), HRDM sample counts. `--json` emits the same structures for
+  external analysis. Every number is folded from recorded events — nothing
+  estimated, nothing imputed.
+- **C1 detectors** (landed just after the alpha.4 tag): verify judges must
+  name the MCW coordination failure on REVISE (`MODE: <name>`), journaled as
+  typed FailureSignals with the implicated draft IU; visit-cap exhaustion
+  journals an honest `Unspecified` signal. Unknown names are never
+  force-fit onto the taxonomy.
+- **Continuity docs**: `AGENT.md` (canonical agent briefing) + `CLAUDE.md`;
+  `docs/design/phase-3-learning.md` (MCW coverage matrix, metrics catalog,
+  HRDM operationalization plan, benchmark protocol). Open TODOs now live as
+  GitHub Issues.
+
 ## v0.1.0-alpha.4 — the trilogy, portable everywhere (2026-08-30)
 
 - **All three graphification tiers**: `graffy graphify <path> --mode

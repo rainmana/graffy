@@ -1,5 +1,8 @@
 # graffy roadmap
 
+> Canonical TODO tracking lives in [GitHub Issues](https://github.com/rainmana/graffy/issues). This file keeps design
+> breadcrumbs for tabled ideas; when picking up work, check Issues first.
+
 Phases gate scope; nothing ships half-instrumented. Telemetry schemas (journal + MCW) landed in
 Phase 0 precisely so later phases never retrofit observability.
 

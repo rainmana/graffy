@@ -125,14 +125,16 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
 - **Phase 2 core shipped**: tool plane, rmcp client + skill-fronted facades,
   prompts-as-knowledge + MCW-instrumented interview, graphify with all
   three involvement tiers.
-- **Phase 3 in progress — the MCW learning loop** (see the plan in
-  docs/design/phase-3-learning.md once it lands): C1 detectors (verify
-  judges name the failure mode; cap-exhaustion signals), C2 budget-bounded
-  retry-with-feedback across sessions, C3 optional feedback meta-eval,
-  C4 durable Lessons for BOTH the agent (injected knowledge) and the human
-  (prompting improvement), C5 first-class MCW research metrics (`graffy
-  metrics`, HRDM series, portable research bundles). Everything that
-  executes does so as a graph.
+- **Phase 3 in progress — the MCW learning loop** (design + coverage
+  matrix: docs/design/phase-3-learning.md). SHIPPED: C1 detectors (verify
+  judges name the failure mode; cap-exhaustion signals), C5 v1 (`graffy
+  metrics` folds journals into research metrics; `graffy init` + ~/.graffy
+  home). NEXT: C2 budget-bounded retry-with-feedback across sessions, C3
+  feedback meta-eval + model HRDM raters, C4 durable Lessons for BOTH the
+  agent (injected knowledge) and the human (prompting improvement), C5b
+  HRDM anchor rubric + pricing tables + portable research bundles.
+  Everything that executes does so as a graph. **Open TODOs are filed as
+  GitHub Issues — read those before inventing work.**
 - Big tabled items: model-assisted graphify decomposition (B2), structural
   editing in collaborative review, HTTP MCP transport, theme engine +
   accessibility deepening, Apple signing, LangGraph export, graffy
@@ -146,6 +148,8 @@ cargo run -- run graffy.builtin.conversation --prompt "hi" --offline --tui
 cargo run -- graphify SKILL.md --mode collaborative
 cargo run -- mcp add fixture --stdio "python3 crates/graffy-mcp/tests/fixture/mini_server.py"
 cargo run -- replay graffy-runs/<id>.journal --tui
+cargo run -- init                            # create ~/.graffy, seed built-ins
+cargo run -- metrics --json                  # fold journals into research metrics
 cargo run -- doctor                          # bindings, store, credentials presence
 GRAFFY_DATA_DIR=<dir>                        # override store location (tests/demos)
 cargo test -p graffy-mcp -- --ignored        # real npx MCP server round-trip

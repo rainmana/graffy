@@ -5,7 +5,7 @@
 //!   time; PauseForDisambiguation checkpoints freeze the view with an
 //!   approve / reject / edit prompt; stays open for inspection afterwards.
 //! * [`run_replay`] — fold a finished journal and open the step inspector.
-//! * [`run_home`] — pick a journal from `graffy-runs/` and inspect it.
+//! * [`run_home`] — pick a journal from the runs directory and inspect it.
 //!
 //! Keys: `q`/`Esc` quit · `Tab` switch Run/Inspect · `↑`/`↓` select node ·
 //! `j`/`k` scroll detail. During an approval: `a` approve · `r` reject ·
@@ -189,9 +189,8 @@ pub fn run_replay(journal_path: &Path) -> Result<()> {
     result
 }
 
-/// Journal picker over `graffy-runs/`, opening the inspector on selection.
-pub fn run_home() -> Result<()> {
-    let dir = Path::new("graffy-runs");
+/// Journal picker over the runs directory, opening the inspector on selection.
+pub fn run_home(dir: &Path) -> Result<()> {
     let mut journals: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
@@ -205,7 +204,7 @@ pub fn run_home() -> Result<()> {
     journals.reverse();
 
     if journals.is_empty() {
-        println!("no journals in graffy-runs/ yet.");
+        println!("no journals in {} yet.", dir.display());
         println!("try: graffy run graffy.builtin.conversation --prompt \"hello\" --offline --tui");
         return Ok(());
     }
@@ -248,7 +247,7 @@ fn pick_journal(journals: &[PathBuf]) -> Result<Option<PathBuf>> {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(" graffy-runs/ "),
+                            .title(" run journals "),
                     )
                     .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
                 f.render_stateful_widget(list, body, &mut list_state);

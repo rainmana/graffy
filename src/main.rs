@@ -38,6 +38,17 @@ enum Command {
     /// Open the TUI journal browser (pick past runs to inspect).
     Tui,
     /// Execute a TOML graph spec against a prompt.
+    /// Create the graffy home (default ~/.graffy) and seed the store.
+    Init,
+    /// Fold run journals into research metrics (the MCW dataset, aggregated).
+    Metrics {
+        /// Directory of .journal files (default: <home>/runs).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of the text summary.
+        #[arg(long)]
+        json: bool,
+    },
     Run {
         /// Path to a TOML graph spec (see graphs/), or a registered graph id.
         spec: String,
@@ -52,7 +63,7 @@ enum Command {
         /// no network — for demos and engine testing; clearly labeled).
         #[arg(long)]
         offline: bool,
-        /// Journal output path (default: graffy-runs/<ulid>.journal).
+        /// Journal output path (default: <home>/runs/<ulid>.journal).
         #[arg(long)]
         journal: Option<PathBuf>,
     },
@@ -166,7 +177,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match cli.command.unwrap_or(Command::Tui) {
-        Command::Tui => graffy_tui::run_home(),
+        Command::Tui => graffy_tui::run_home(&runs_dir()),
+        Command::Init => cmd_init().await,
+        Command::Metrics { dir, json } => cmd_metrics(dir, json),
         Command::Run {
             spec,
             prompt,
@@ -228,15 +241,175 @@ async fn main() -> anyhow::Result<()> {
 // Store plumbing
 // ---------------------------------------------------------------------------
 
-fn db_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("GRAFFY_DATA_DIR")
-        && !dir.is_empty()
-    {
-        return PathBuf::from(dir).join("graffy.db");
+/// Resolve the graffy home. Precedence: GRAFFY_DATA_DIR (legacy name, kept
+/// working), GRAFFY_HOME, a pre-alpha.5 platform data dir IF a store already
+/// lives there (nobody's history disappears on upgrade), else `~/.graffy`.
+fn graffy_home() -> PathBuf {
+    for var in ["GRAFFY_DATA_DIR", "GRAFFY_HOME"] {
+        if let Ok(dir) = std::env::var(var)
+            && !dir.is_empty()
+        {
+            return PathBuf::from(dir);
+        }
     }
-    directories::ProjectDirs::from("dev", "graffy", "graffy")
-        .map(|dirs| dirs.data_dir().join("graffy.db"))
-        .unwrap_or_else(|| PathBuf::from(".graffy/graffy.db"))
+    if let Some(dirs) = directories::ProjectDirs::from("dev", "graffy", "graffy") {
+        let legacy = dirs.data_dir().to_path_buf();
+        if legacy.join("graffy.db").exists() {
+            return legacy;
+        }
+    }
+    default_home()
+}
+
+/// `~/.graffy`, or `./.graffy` when no home directory can be determined.
+fn default_home() -> PathBuf {
+    directories::BaseDirs::new()
+        .map(|b| b.home_dir().join(".graffy"))
+        .unwrap_or_else(|| PathBuf::from(".graffy"))
+}
+
+fn db_path() -> PathBuf {
+    graffy_home().join("graffy.db")
+}
+
+/// Where run journals land by default (`<home>/runs`).
+fn runs_dir() -> PathBuf {
+    graffy_home().join("runs")
+}
+
+/// `graffy init` — create the home, seed built-ins, say where everything is.
+async fn cmd_init() -> anyhow::Result<()> {
+    std::fs::create_dir_all(runs_dir())?;
+    let _store = open_store().await?;
+    println!("graffy home : {}", graffy_home().display());
+    println!("store       : {}", db_path().display());
+    println!("run journals: {}", runs_dir().display());
+    println!("override    : set GRAFFY_HOME (or GRAFFY_DATA_DIR) to relocate");
+    if let Some(dirs) = directories::ProjectDirs::from("dev", "graffy", "graffy") {
+        let legacy = dirs.data_dir().join("graffy.db");
+        if legacy.exists() && legacy != db_path() {
+            println!(
+                "note: a legacy store exists at {} — move it into the home above to keep that history",
+                legacy.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `graffy metrics` — fold run journals into research metrics (C5 v1).
+fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
+    use graffy_core::journal::JournalReader;
+    use graffy_core::metrics::{AggregateMetrics, MetricsReport, RunMetrics};
+
+    let dir = dir.unwrap_or_else(|| {
+        let preferred = runs_dir();
+        let legacy = PathBuf::from("graffy-runs");
+        if !preferred.exists() && legacy.exists() {
+            eprintln!(
+                "note: reading ./graffy-runs (legacy location); new runs land in {}",
+                preferred.display()
+            );
+            legacy
+        } else {
+            preferred
+        }
+    });
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "journal"))
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+    if paths.is_empty() {
+        println!("no journals found in {}", dir.display());
+        println!("try: graffy run graffy.builtin.conversation --prompt \"hello\" --offline");
+        return Ok(());
+    }
+    let mut rows = Vec::new();
+    for p in &paths {
+        match JournalReader::read_all(p) {
+            Ok(events) => rows.push(RunMetrics::fold(&events)),
+            Err(err) => eprintln!("skipping {}: {err}", p.display()),
+        }
+    }
+    let aggregate = AggregateMetrics::from_rows(&rows);
+    if json {
+        let report = MetricsReport {
+            generated_by: format!("graffy {}", env!("CARGO_PKG_VERSION")),
+            runs: rows,
+            aggregate,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!(
+        "graffy metrics — {} runs from {}",
+        rows.len(),
+        dir.display()
+    );
+    println!();
+    for r in &rows {
+        println!(
+            "  {}  {:<9} esc {} · fail {} · repair {} · caps {}  ({})",
+            r.run_id,
+            r.status,
+            r.escalations,
+            r.failure_signals,
+            r.repairs,
+            r.visit_cap_hits,
+            r.graph_name
+        );
+    }
+    println!();
+    println!("aggregate");
+    println!(
+        "  runs         : {} {:?}",
+        aggregate.runs, aggregate.runs_by_status
+    );
+    println!(
+        "  tokens       : {} in / {} out   cost: ${:.4}",
+        aggregate.input_tokens, aggregate.output_tokens, aggregate.cost_usd
+    );
+    println!(
+        "  model calls  : {} · tool calls {} · IUs {}",
+        aggregate.model_calls, aggregate.tool_calls, aggregate.ius_recorded
+    );
+    println!(
+        "  failures     : {} {:?}",
+        aggregate.failure_signals, aggregate.failures_by_mode
+    );
+    println!(
+        "  repairs      : {} {:?} (cost {} tokens)",
+        aggregate.repairs, aggregate.repairs_by_op, aggregate.repair_cost_tokens
+    );
+    println!(
+        "  evidence     : {} {:?}",
+        aggregate.evidence_artifacts, aggregate.evidence_by_level
+    );
+    println!(
+        "  escalation   : {} runs escalated · success with/without escalation: {} / {}",
+        aggregate.runs_with_escalation,
+        rate_str(aggregate.escalation_success_rate),
+        rate_str(aggregate.baseline_success_rate)
+    );
+    println!(
+        "  convergence  : {} runs hit a visit cap · mean escalations/run {:.2}",
+        aggregate.runs_with_cap_hits, aggregate.mean_escalations_per_run
+    );
+    println!(
+        "  hrdm samples : {} (rubric-scored — see docs/design/phase-3-learning.md)",
+        aggregate.hrdm_samples
+    );
+    Ok(())
+}
+
+fn rate_str(r: Option<f64>) -> String {
+    r.map(|v| format!("{:.0}%", v * 100.0))
+        .unwrap_or_else(|| "n/a".to_owned())
 }
 
 /// Open the store and make sure shipped built-ins are registered.
@@ -305,9 +478,8 @@ async fn run_graph(
 ) -> anyhow::Result<()> {
     let spec_text = resolve_spec(&spec_arg).await?;
     let spec = GraphSpec::from_toml_str(&spec_text)?;
-    let journal_path = journal.unwrap_or_else(|| {
-        PathBuf::from("graffy-runs").join(format!("{}.journal", ulid_like_stamp()))
-    });
+    let journal_path =
+        journal.unwrap_or_else(|| runs_dir().join(format!("{}.journal", ulid_like_stamp())));
     let invoker = build_invoker(offline);
     let tool_plane = build_tool_plane(&spec).await?;
 
@@ -937,7 +1109,9 @@ async fn doctor() -> anyhow::Result<()> {
         "proto packages: {}",
         graffy_proto::PROTO_PACKAGES.join(", ")
     );
+    println!("home : {}", graffy_home().display());
     println!("store: {}", db_path().display());
+    println!("runs : {}", runs_dir().display());
     match open_store().await {
         Ok(store) => {
             let (graphs, runs, events) = store.stats().await?;

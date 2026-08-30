@@ -16,6 +16,7 @@ pub mod exec;
 pub mod graph;
 pub mod id;
 pub mod journal;
+pub mod metrics;
 pub mod spec;
 
 /// Core library version (workspace-synced).
