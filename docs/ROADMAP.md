@@ -89,4 +89,19 @@ Goal: a stranger can watch a prompt refuse to run raw.
   and pipes get the same information (`replay` without `--tui` already is that parity for
   inspection).
 
+- **LangGraph export** (idea to investigate, far future): `graffy graph export
+  --format langgraph` emitting a self-contained Python package that runs the
+  graph *without graffy* — nodes/edges/guards map cleanly onto a LangGraph
+  StateGraph with conditional edges. Design breadcrumbs for when this comes up:
+  @rainmana's earlier **graphc** project (YAML/TOML → governed LangGraph with
+  approval gates, retries, checkpoints) is the reference compiler for the
+  target side, and LangConfig's export-as-runnable-package pattern is prior
+  art for the packaging. The honest hard part is governance parity: evidence
+  artifacts, the epistemic floor, MCW journaling, visit caps, and tier routing
+  have no native LangGraph equivalents — an export must compile them to
+  wrapper nodes + checkpointer state where possible and ship a "parity
+  disclosure" naming which invariants survive export and which degrade.
+  Export is one-way by design; importing LangGraph graphs is a separate,
+  unscoped question.
+
 Out of scope (explicitly, per ADR-0002): GUI/web/Tauri clients. graffy is terminal-native.
