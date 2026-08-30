@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased (v0.1.0-alpha.5)
+## Unreleased (v0.1.0-alpha.6)
+
+- **C2 — retry-with-feedback**: `graffy run --retry <n|auto>`. Failed runs
+  re-execute in the same session with the judge's critique injected as
+  CORRECTION IUs (on the same review-feedback channel the in-run revise
+  loop uses), and every retry attempt journals a `RepairAction` — canonical
+  failure→repair mapping (drift→re-grounding, overcompression→decompression,
+  false alignment→disambiguation, asymmetric advancement→synchronization;
+  re-grounding as the framework's own universal fallback for the two modes
+  with no canonical op), back-linked to the triggering FailureSignal, with
+  observed token/time costs and the honest outcome. Retries are ALWAYS
+  bounded ('auto' = 3 extra attempts) — unbounded repair is unlawful for
+  the same reason unguarded cycles are. A session's journals ARE the repair
+  episode — exactly the rating unit the H/R/D/M instrument scores.
+- **HRDM journal adaptation**: `docs/mcw/hrdm-in-graffy.md` — a declared
+  Article V extension mapping the framework's canonical rating units onto
+  graffy sessions (exchange = run, window = 5 runs, repair episode = retry
+  chain, late discovery = IU-linked), with a blinding procedure for
+  journal-mediated rating. Draft, awaiting the framework author's
+  ratification.
+- Open TODO tracking moved to GitHub Issues (#1–#17).
+
+## v0.1.0-alpha.5 — a home, and the numbers (2026-08-30)
 
 - **`graffy init` + a real home**: everything now lives in `~/.graffy` —
   store at `~/.graffy/graffy.db`, journals in `~/.graffy/runs` — so the

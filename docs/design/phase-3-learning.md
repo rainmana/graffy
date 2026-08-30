@@ -18,18 +18,18 @@ at runtime into run journals. **Acted on**: changes execution behavior.
 | --- | --- | --- | --- | --- |
 | Information Units (typed, salience, provenance) | ✅ | ✅ every run | ✅ ledger feeds nodes | ✅ counts |
 | IU five-stage lifecycle (selection→integration) | ✅ `IuStageRecord` | ⚠️ stages recorded only where nodes set them | ⬜ | ⬜ per-stage fidelity |
-| Failure mode: Drift | ✅ | ✅ judge-named (C1) | ⬜ (C2 feeds it back) | ✅ frequency |
+| Failure mode: Drift | ✅ | ✅ judge-named (C1) | ✅ C2 feeds the critique back as repair | ✅ frequency |
 | Failure mode: Asymmetric State Advancement | ✅ | ✅ judge-named (C1) | ✅ **prevented** — effector approval gates | ✅ frequency |
 | Failure mode: False Alignment | ✅ | ✅ judge-named (C1) + interview contradiction probe | ⚠️ interview: conservative annotation wins | ✅ frequency |
 | Failure mode: Overcompression | ✅ | ✅ judge-named (C1) | ⚠️ digest nodes carry preserve-distinctions knowledge | ✅ frequency |
 | Failure mode: Constraint Opacity | ✅ | ✅ judge-named (C1) | ✅ tool-shape drift warning at run start | ✅ frequency |
 | Failure mode: Repair Suppression | ✅ | ✅ judge-named (C1) | ⬜ | ✅ frequency |
 | Convergence exhaustion (not a canonical mode — kept `Unspecified`, never force-fit) | ✅ | ✅ visit-cap signal (C1) | ✅ halts the path | ✅ cap-hit runs |
-| Repair op: Re-grounding | ✅ node kind | ⚠️ event exists; no built-in emits yet | ⬜ C2 wires detection→repair | ✅ counts+token cost (ready) |
-| Repair op: Decompression | ✅ node kind | ⚠️ same | ⬜ | ✅ (ready) |
-| Repair op: Re-weighting | ✅ node kind | ⚠️ same | ⬜ | ✅ (ready) |
-| Repair op: Disambiguation | ✅ node kind | ⚠️ same | ✅ `PauseForDisambiguation` + interview follow-ups | ✅ (ready) |
-| Repair op: Synchronization | ✅ node kind | ⚠️ same | ⬜ | ✅ (ready) |
+| Repair op: Re-grounding | ✅ node kind | ✅ retry attempts journal RepairActions (C2) | ✅ `--retry` wires detection→repair | ✅ counts+token cost |
+| Repair op: Decompression | ✅ node kind | ✅ via C2 when the judge names overcompression | ✅ | ✅ |
+| Repair op: Re-weighting | ✅ node kind | ⚠️ no path emits yet (no designated mode in canon) | ⬜ | ✅ (ready) |
+| Repair op: Disambiguation | ✅ node kind | ✅ via C2 when the judge names false_alignment | ✅ `PauseForDisambiguation` + interview follow-ups | ✅ |
+| Repair op: Synchronization | ✅ node kind | ✅ via C2 when the judge names asymmetric_state_advancement | ✅ | ✅ |
 | H/R/D/M observables | ✅ `HrdmSample` (anchored ordinal scores + rubric version + rater) | ⬜ **adaptation drafted, awaiting ratification** (§4) | ⬜ | ✅ sample counts (fold ready) |
 | Evidence levels L0–L3 | ✅ | ✅ every artifact | ✅ strict vs trace-only policy | ✅ distribution |
 | Evidence artifacts (hash-addressed) | ✅ | ✅ | ✅ ground-before-draft floor | ✅ counts |
@@ -37,15 +37,16 @@ at runtime into run journals. **Acted on**: changes execution behavior.
 
 **Summary for the impatient**: the *observability* layer of MCW is in and
 measured (IUs, six failure modes via judge detection, evidence levels,
-convergence). The *repair* layer is typed and executable but not yet driven
-by detection (that is exactly C2). The *H/R/D/M scoring* layer has its
+convergence). The *repair* layer is now
+detection-driven (C2): failed attempts re-run with the judge's critique as
+CORRECTION IUs and journal RepairActions with honest observed costs. The *H/R/D/M scoring* layer has its
 canonical anchors in the framework repo; graffy's journal adaptation is
 drafted and awaits ratification (§4). Detection today is judge-based (one detector); per-mode
 heuristic detectors are future work that the journal format already supports.
 
 ## 2. What ships the learning loop (C2–C4)
 
-- **C2 — retry with feedback** (`graffy run --retry n|auto`): when a run
+- **C2 — retry with feedback** (`graffy run --retry n|auto`) — **SHIPPED v1**: when a run
   ends REVISE-exhausted or failed, re-run it in the same session with the
   judge's critique + named failure mode injected as CORRECTION IUs. Budgeted
   always (attempt cap, token/USD/second ceilings); `auto` stops on PASS,
@@ -56,6 +57,9 @@ heuristic detectors are future work that the journal format already supports.
   alignment → disambiguation question surfaced; constraint opacity →
   constraints restated explicitly. RepairAction events finally get emitted
   by a real path (with `triggered_by_failure_id` back-links and token costs).
+  V1 scope: stops on PASS, attempt cap, or a missing signal; the
+  no-improvement early stop and human-in-the-loop repair paths are issue #1
+  v2 territory.
 - **C3 — feedback meta-eval**: optional judge-the-judge pass scoring the
   critique's specificity and actionability before it is trusted as feedback;
   doubles as the **model-rater path for HRDM sampling** (§4).

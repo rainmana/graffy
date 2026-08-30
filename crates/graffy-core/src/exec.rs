@@ -109,6 +109,39 @@ pub fn parse_judge_mode(text: &str) -> Option<String> {
     None
 }
 
+/// Cross-run repair context (C2): a failure signal harvested from a prior
+/// attempt, carried into this run so the judge's critique becomes CORRECTION
+/// IUs the draft node consumes. The retry loop that builds these is always
+/// budget-bounded — unbounded repair is unlawful for the same reason
+/// unguarded cycles are.
+#[derive(Debug, Clone)]
+pub struct RepairFeedback {
+    /// FailureSignal id from the prior attempt (RepairAction back-link).
+    pub failure_id: String,
+    pub mode: mcw::FailureMode,
+    /// The judge's critique (the failure's early_signal).
+    pub critique: String,
+    /// 1-based attempt number that produced this feedback.
+    pub source_attempt: u32,
+}
+
+/// Map a detected failure mode onto the canonical repair operation per the
+/// mcw-framework failure↔repair mapping. Constraint Opacity and Repair
+/// Suppression have NO canonical operation (an acknowledged gap in the
+/// framework's canon); re-grounding doubles as the universal fallback, so
+/// they — and Unspecified — land there rather than on an invented op.
+pub fn repair_op_for_mode(mode: mcw::FailureMode) -> mcw::RepairOperation {
+    match mode {
+        mcw::FailureMode::Overcompression => mcw::RepairOperation::Decompression,
+        mcw::FailureMode::FalseAlignment => mcw::RepairOperation::Disambiguation,
+        mcw::FailureMode::AsymmetricStateAdvancement => mcw::RepairOperation::Synchronization,
+        mcw::FailureMode::Drift
+        | mcw::FailureMode::ConstraintOpacity
+        | mcw::FailureMode::RepairSuppression
+        | mcw::FailureMode::Unspecified => mcw::RepairOperation::Regrounding,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Guard expressions
 // ---------------------------------------------------------------------------
@@ -974,12 +1007,19 @@ pub struct RunInput {
     pub prompt: String,
     /// Reuse an existing coordination session, or mint one.
     pub session_id: Option<String>,
+    /// C2: repair context from a prior attempt in the same session. Empty
+    /// for first attempts. Each item becomes a CORRECTION IU at run start
+    /// and a journaled RepairAction (with honest costs) at run end.
+    pub feedback: Vec<RepairFeedback>,
 }
 
 /// What a finished run hands back (everything else is in the journal).
 #[derive(Debug)]
 pub struct RunOutcome {
     pub run_id: String,
+    /// The coordination session this run belonged to (minted or reused) —
+    /// retry loops carry it forward so attempts stay linked.
+    pub session_id: String,
     pub status: wire::RunStatus,
     pub final_text: Option<String>,
     pub journal_path: std::path::PathBuf,
@@ -1047,6 +1087,7 @@ impl Executor {
             .unwrap_or_else(|| SessionId::generate().to_string());
         let evidence_visible = spec.policy.evidence.mode != "trace-only";
 
+        let run_started_at = now_ts();
         let mut journal =
             JournalWriter::create_with_tap(journal_path, &run_id, self.event_tap.clone())?;
         journal.append(Event::RunStarted(wire::RunManifest {
@@ -1056,13 +1097,52 @@ impl Executor {
             graph_version: spec.graph.version.clone(),
             spec_sha256: sha256_hex(spec_toml.as_bytes()),
             session_id: session_id.clone(),
-            started_at: Some(now_ts()),
+            started_at: Some(run_started_at),
             evidence_mode: spec.policy.evidence.mode.clone(),
             evidence_min_level: spec.policy.evidence.min_level.clone(),
             graffy_version: crate::VERSION.to_owned(),
         }))?;
 
         let mut ledger: Vec<mcw::InformationUnit> = Vec::new();
+
+        // C2: cross-run repair context. The judge's critique from a prior
+        // attempt enters this run as CORRECTION IUs on the same
+        // "review-feedback" channel the in-run revise loop already uses —
+        // the draft node consumes them with no special casing.
+        let mut correction_iu_ids: Vec<String> = Vec::new();
+        for item in &input.feedback {
+            let mode_label = item
+                .mode
+                .as_str_name()
+                .trim_start_matches("FAILURE_MODE_")
+                .to_ascii_lowercase();
+            let iu = mcw::InformationUnit {
+                id: IuId::generate().to_string(),
+                kind: mcw::IuKind::Correction as i32,
+                payload_text: item.critique.clone(),
+                created_at: Some(now_ts()),
+                source: Some(mcw::ActorRef {
+                    id: spec.graph.id.clone(),
+                    kind: mcw::actor_ref::ActorKind::Graph as i32,
+                    display_name: format!(
+                        "retry-with-feedback (from attempt {})",
+                        item.source_attempt
+                    ),
+                }),
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                salience: 0.9,
+                attributes: HashMap::from([
+                    ("role".to_owned(), "review-feedback".to_owned()),
+                    ("mcw_mode".to_owned(), mode_label),
+                    ("repairs_failure_id".to_owned(), item.failure_id.clone()),
+                ]),
+                ..Default::default()
+            };
+            correction_iu_ids.push(iu.id.clone());
+            journal.append(Event::IuRecorded(iu.clone()))?;
+            ledger.push(iu);
+        }
         let mut queue: VecDeque<(NodeIndex, BTreeMap<String, String>)> = graph
             .entry_nodes()
             .into_iter()
@@ -1346,6 +1426,38 @@ impl Executor {
         } else {
             wire::RunStatus::Failed
         });
+        // C2: this run WAS the repair attempt for any carried feedback —
+        // journal the RepairAction with observed costs and the honest
+        // outcome. Hard-error exits above deliberately emit none: retry
+        // repairs coordination failures, not crashes.
+        for item in &input.feedback {
+            journal.append(Event::RepairExecuted(mcw::RepairAction {
+                id: format!("rep_{}", ulid::Ulid::generate()),
+                operation: repair_op_for_mode(item.mode) as i32,
+                started_at: Some(run_started_at),
+                completed_at: Some(now_ts()),
+                triggered_by_failure_id: item.failure_id.clone(),
+                executor: Some(mcw::ActorRef {
+                    id: spec.graph.id.clone(),
+                    kind: mcw::actor_ref::ActorKind::Graph as i32,
+                    display_name: "retry-with-feedback".to_owned(),
+                }),
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                input_iu_ids: correction_iu_ids.clone(),
+                output_iu_ids: Vec::new(),
+                cost_tokens: input_tokens + output_tokens,
+                cost_seconds: started.elapsed().as_secs_f64(),
+                cost_turns: 1,
+                summary: format!(
+                    "retry attempt {} carrying critique from attempt {}",
+                    item.source_attempt + 1,
+                    item.source_attempt
+                ),
+                successful: status == wire::RunStatus::Succeeded,
+            }))?;
+            repairs += 1;
+        }
         journal.append(Event::RunFinished(wire::RunFinished {
             status: status as i32,
             total_input_tokens: input_tokens,
@@ -1359,6 +1471,7 @@ impl Executor {
 
         Ok(RunOutcome {
             run_id,
+            session_id,
             status,
             final_text,
             journal_path: journal_path.to_path_buf(),
@@ -1430,6 +1543,7 @@ mod tests {
                 RunInput {
                     prompt: "Explain what graffy is in one sentence.".to_owned(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &journal_path,
                 &OfflineEcho,
@@ -1579,6 +1693,7 @@ mod tests {
                 RunInput {
                     prompt: "look something up".to_owned(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &journal_path,
                 &OfflineEcho,
@@ -1625,6 +1740,7 @@ mod tests {
                 RunInput {
                     prompt: "look something up".to_owned(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &journal_path,
                 &OfflineEcho,
@@ -1649,6 +1765,7 @@ mod tests {
                 RunInput {
                     prompt: "unpassable".to_owned(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &journal_path,
                 &AlwaysRevise,
@@ -1719,5 +1836,175 @@ mod tests {
             Some("drift")
         );
         assert_eq!(parse_judge_mode("PASS — fine"), None);
+    }
+
+    #[test]
+    fn repair_ops_map_canonically_with_regrounding_fallback() {
+        assert_eq!(
+            repair_op_for_mode(mcw::FailureMode::Overcompression),
+            mcw::RepairOperation::Decompression
+        );
+        assert_eq!(
+            repair_op_for_mode(mcw::FailureMode::FalseAlignment),
+            mcw::RepairOperation::Disambiguation
+        );
+        assert_eq!(
+            repair_op_for_mode(mcw::FailureMode::AsymmetricStateAdvancement),
+            mcw::RepairOperation::Synchronization
+        );
+        // No canonical op exists for these — universal fallback, never invented.
+        assert_eq!(
+            repair_op_for_mode(mcw::FailureMode::ConstraintOpacity),
+            mcw::RepairOperation::Regrounding
+        );
+        assert_eq!(
+            repair_op_for_mode(mcw::FailureMode::RepairSuppression),
+            mcw::RepairOperation::Regrounding
+        );
+        assert_eq!(
+            repair_op_for_mode(mcw::FailureMode::Unspecified),
+            mcw::RepairOperation::Regrounding
+        );
+    }
+
+    /// Passes verify only after `pass_after` verify calls — models a judge
+    /// that keeps rejecting until the draft finally carries the correction.
+    struct ReviseUntil {
+        pass_after: u32,
+        verify_calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelInvoker for ReviseUntil {
+        async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+            let text = if request.purpose == "verify" {
+                let n = self
+                    .verify_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n < self.pass_after {
+                    "REVISE — still missing the correction\nMODE: drift".to_owned()
+                } else {
+                    "PASS — the correction landed".to_owned()
+                }
+            } else {
+                format!("draft at tier {}", request.tier)
+            };
+            Ok(ModelResponse {
+                provider: "test".to_owned(),
+                model: format!("scripted-{}", request.tier),
+                text,
+                input_tokens: 1,
+                output_tokens: 1,
+                cost_usd: 0.0,
+                latency_ms: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_feedback_repairs_and_converges() {
+        let spec = GraphSpec::from_toml_str(DEFAULT_CONVERSATION).unwrap();
+        let invoker = ReviseUntil {
+            pass_after: 3, // attempt 1 exhausts verify's visit cap; attempt 2 passes
+            verify_calls: std::sync::atomic::AtomicU32::new(0),
+        };
+
+        // Attempt 1: fails honestly, journaling judge-named drift signals.
+        let j1 = temp_path("retry-attempt1");
+        let first = Executor::default()
+            .run(
+                &spec,
+                DEFAULT_CONVERSATION,
+                RunInput {
+                    prompt: "retry convergence test".to_owned(),
+                    session_id: None,
+                    feedback: Vec::new(),
+                },
+                &j1,
+                &invoker,
+                &AutoApprove,
+            )
+            .await
+            .expect("attempt 1 must complete (failed, not crashed)");
+        assert_ne!(first.status, wire::RunStatus::Succeeded);
+
+        // Harvest the judge-named signal, exactly as the CLI loop does.
+        let events1 = JournalReader::read_all(&j1).unwrap();
+        let signal = events1
+            .iter()
+            .filter_map(|e| match &e.event {
+                Some(Event::FailureRaised(f)) if f.mode != mcw::FailureMode::Unspecified as i32 => {
+                    Some(f.clone())
+                }
+                _ => None,
+            })
+            .next_back()
+            .expect("judge-named failure signal");
+
+        // Attempt 2: same session, critique carried as repair feedback.
+        let j2 = temp_path("retry-attempt2");
+        let second = Executor::default()
+            .run(
+                &spec,
+                DEFAULT_CONVERSATION,
+                RunInput {
+                    prompt: "retry convergence test".to_owned(),
+                    session_id: Some(first.session_id.clone()),
+                    feedback: vec![RepairFeedback {
+                        failure_id: signal.id.clone(),
+                        mode: mcw::FailureMode::try_from(signal.mode)
+                            .unwrap_or(mcw::FailureMode::Unspecified),
+                        critique: signal.early_signal.clone(),
+                        source_attempt: 1,
+                    }],
+                },
+                &j2,
+                &invoker,
+                &AutoApprove,
+            )
+            .await
+            .expect("attempt 2 must run");
+        assert_eq!(second.status, wire::RunStatus::Succeeded, "convergence");
+        assert_eq!(second.session_id, first.session_id, "session linkage");
+
+        let events2 = JournalReader::read_all(&j2).unwrap();
+        let correction = events2.iter().any(|e| {
+            matches!(
+                &e.event,
+                Some(Event::IuRecorded(iu))
+                    if iu.kind == mcw::IuKind::Correction as i32
+                        && iu.attributes.get("role").is_some_and(|r| r == "review-feedback")
+            )
+        });
+        assert!(
+            correction,
+            "critique must land as a CORRECTION IU on the review-feedback channel"
+        );
+        let repair = events2
+            .iter()
+            .filter_map(|e| match &e.event {
+                Some(Event::RepairExecuted(r)) => Some(r.clone()),
+                _ => None,
+            })
+            .next()
+            .expect("RepairAction must be journaled");
+        assert_eq!(repair.triggered_by_failure_id, signal.id, "back-link");
+        assert!(
+            repair.successful,
+            "attempt 2 passed, so the repair succeeded"
+        );
+        assert_eq!(
+            repair.operation,
+            mcw::RepairOperation::Regrounding as i32,
+            "drift → re-grounding (canonical mapping)"
+        );
+        assert!(repair.cost_tokens > 0, "honest observed cost");
+        let finished_repairs = events2.iter().find_map(|e| match &e.event {
+            Some(Event::RunFinished(f)) => Some(f.repair_count),
+            _ => None,
+        });
+        assert_eq!(finished_repairs, Some(1), "RunFinished counts the repair");
+        std::fs::remove_file(&j1).ok();
+        std::fs::remove_file(&j2).ok();
     }
 }

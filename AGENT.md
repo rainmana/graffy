@@ -129,10 +129,12 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
   matrix: docs/design/phase-3-learning.md). SHIPPED: C1 detectors (verify
   judges name the failure mode; cap-exhaustion signals), C5 v1 (`graffy
   metrics` folds journals into research metrics; `graffy init` + ~/.graffy
-  home). NEXT: C2 budget-bounded retry-with-feedback across sessions, C3
-  feedback meta-eval + model HRDM raters, C4 durable Lessons for BOTH the
-  agent (injected knowledge) and the human (prompting improvement), C5b
-  HRDM anchor rubric + pricing tables + portable research bundles.
+  home), C2 v1 (`--retry n|auto` — judge critiques feed back as
+  CORRECTION IUs; RepairActions journaled with failure back-links and
+  observed costs; always attempt-capped). NEXT: C3 feedback meta-eval +
+  model HRDM raters, C4 durable Lessons for BOTH the agent (injected
+  knowledge) and the human (prompting improvement), C5b `graffy rate` per
+  docs/mcw/hrdm-in-graffy.md + pricing tables + portable research bundles.
   Everything that executes does so as a graph. **Open TODOs are filed as
   GitHub Issues — read those before inventing work.**
 - Big tabled items: model-assisted graphify decomposition (B2), structural
@@ -145,6 +147,7 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
 ```
 cargo test --workspace                       # 40+ tests, all offline
 cargo run -- run graffy.builtin.conversation --prompt "hi" --offline --tui
+cargo run -- run <graph> --prompt "..." --retry auto   # C2 repair-feedback retries
 cargo run -- graphify SKILL.md --mode collaborative
 cargo run -- mcp add fixture --stdio "python3 crates/graffy-mcp/tests/fixture/mini_server.py"
 cargo run -- replay graffy-runs/<id>.journal --tui

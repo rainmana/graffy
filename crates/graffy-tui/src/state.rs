@@ -531,6 +531,7 @@ mod tests {
                 RunInput {
                     prompt: "state fold test".into(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &path,
                 &OfflineEcho,

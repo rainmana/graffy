@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 
 use graffy_core::exec::ToolInvoker;
 use graffy_core::exec::{
-    ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, OfflineEcho, RunInput,
+    ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, OfflineEcho, RunInput, RunOutcome,
 };
 use graffy_core::journal::{JournalReader, event_kind, summarize, wire};
 use graffy_core::spec::GraphSpec;
@@ -66,6 +66,10 @@ enum Command {
         /// Journal output path (default: <home>/runs/<ulid>.journal).
         #[arg(long)]
         journal: Option<PathBuf>,
+        /// Retry failed runs with the judge's critique fed back as repair
+        /// context: a number of extra attempts, or 'auto' (bounded — 3).
+        #[arg(long)]
+        retry: Option<String>,
     },
     /// Replay a run journal: fold the event stream into a summary.
     Replay {
@@ -186,7 +190,8 @@ async fn main() -> anyhow::Result<()> {
             tui,
             offline,
             journal,
-        } => run_graph(spec, prompt, tui, offline, journal).await,
+            retry,
+        } => run_graph(spec, prompt, tui, offline, journal, retry).await,
         Command::Replay {
             journal,
             tui,
@@ -469,21 +474,43 @@ async fn resolve_spec(spec_arg: &str) -> anyhow::Result<String> {
     );
 }
 
+/// 'auto' retry cap — bounded by design, like every loop in graffy.
+const DEFAULT_AUTO_RETRIES: u32 = 3;
+
 async fn run_graph(
     spec_arg: String,
     prompt: String,
     tui: bool,
     offline: bool,
     journal: Option<PathBuf>,
+    retry: Option<String>,
 ) -> anyhow::Result<()> {
     let spec_text = resolve_spec(&spec_arg).await?;
     let spec = GraphSpec::from_toml_str(&spec_text)?;
-    let journal_path =
-        journal.unwrap_or_else(|| runs_dir().join(format!("{}.journal", ulid_like_stamp())));
     let invoker = build_invoker(offline);
     let tool_plane = build_tool_plane(&spec).await?;
 
-    let outcome = if tui {
+    // C2: retries are ALWAYS bounded — 'auto' means "until PASS or the
+    // default attempt cap", never "forever". Per-attempt token/time budgets
+    // still enforce inside each run.
+    let max_attempts: u32 = match retry.as_deref() {
+        None => 1,
+        Some("auto") => 1 + DEFAULT_AUTO_RETRIES,
+        Some(n) => {
+            1 + n.parse::<u32>().map_err(|_| {
+                anyhow::anyhow!("--retry takes a number of extra attempts or 'auto', got '{n}'")
+            })?
+        }
+    };
+    if tui && max_attempts > 1 {
+        anyhow::bail!(
+            "--retry is not supported with --tui yet — run plain, then replay any attempt in the TUI"
+        );
+    }
+
+    if tui {
+        let journal_path =
+            journal.unwrap_or_else(|| runs_dir().join(format!("{}.journal", ulid_like_stamp())));
         let Some(outcome) = graffy_tui::run_live(
             spec.clone(),
             spec_text.clone(),
@@ -496,32 +523,116 @@ async fn run_graph(
         else {
             std::process::exit(1);
         };
-        outcome
-    } else {
+        report_outcome(&spec, &spec_text, outcome).await;
+        return Ok(());
+    }
+
+    let mut session_id: Option<String> = None;
+    let mut feedback: Vec<graffy_core::exec::RepairFeedback> = Vec::new();
+    for attempt in 1..=max_attempts {
+        let journal_path = match (&journal, attempt) {
+            (Some(path), 1) => path.clone(),
+            // Extra attempts always mint fresh journals — one file per run,
+            // linked by the shared session id (the repair episode's spine).
+            _ => runs_dir().join(format!("{}.journal", ulid_like_stamp())),
+        };
         println!(
-            "graph '{}' v{} — executing (every step journaled)",
+            "graph '{}' v{} — executing (attempt {attempt}/{max_attempts}, every step journaled)",
             spec.graph.name, spec.graph.version
         );
         let executor = Executor {
             tool_invoker: tool_plane.clone(),
             ..Default::default()
         };
-        executor
+        let outcome = executor
             .run(
                 &spec,
                 &spec_text,
                 RunInput {
-                    prompt,
-                    session_id: None,
+                    prompt: prompt.clone(),
+                    session_id: session_id.clone(),
+                    feedback: std::mem::take(&mut feedback),
                 },
                 &journal_path,
                 invoker.as_ref(),
                 &CliApprovalHandler,
             )
-            .await?
-    };
+            .await?;
+        session_id = Some(outcome.session_id.clone());
+        let succeeded = outcome.status == graffy_proto::journal::v1::RunStatus::Succeeded;
+        let harvest_path = outcome.journal_path.clone();
+        report_outcome(&spec, &spec_text, outcome).await;
 
+        if succeeded {
+            if attempt > 1 {
+                println!("\nconverged on attempt {attempt}/{max_attempts} — repair episode closed");
+            }
+            return Ok(());
+        }
+        if attempt == max_attempts {
+            if max_attempts > 1 {
+                println!(
+                    "\nretry budget exhausted ({max_attempts} attempts) — failing honestly; \
+                     the convergence series lives in this session's journals"
+                );
+            }
+            return Ok(());
+        }
+        match harvest_feedback(&harvest_path, attempt) {
+            Some(item) => {
+                println!(
+                    "\nattempt {attempt} failed ({}) — retrying with the judge's critique as repair feedback",
+                    item.mode
+                        .as_str_name()
+                        .trim_start_matches("FAILURE_MODE_")
+                        .to_ascii_lowercase()
+                );
+                feedback = vec![item];
+            }
+            None => {
+                println!(
+                    "\nattempt {attempt} failed with no failure signal to feed back — \
+                     stopping retries (nothing to repair from)"
+                );
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pull the most recent failure signal out of a journal — judge-named modes
+/// preferred over Unspecified — as the next attempt's repair context.
+fn harvest_feedback(
+    journal_path: &std::path::Path,
+    attempt: u32,
+) -> Option<graffy_core::exec::RepairFeedback> {
+    let events = graffy_core::journal::JournalReader::read_all(journal_path).ok()?;
+    let mut last_any = None;
+    let mut last_named = None;
+    for ev in &events {
+        if let Some(graffy_core::journal::wire::run_event::Event::FailureRaised(f)) = &ev.event {
+            last_any = Some(f);
+            if f.mode != graffy_proto::mcw::v1::FailureMode::Unspecified as i32 {
+                last_named = Some(f);
+            }
+        }
+    }
+    let f = last_named.or(last_any)?;
+    Some(graffy_core::exec::RepairFeedback {
+        failure_id: f.id.clone(),
+        mode: graffy_proto::mcw::v1::FailureMode::try_from(f.mode)
+            .unwrap_or(graffy_proto::mcw::v1::FailureMode::Unspecified),
+        critique: f.early_signal.clone(),
+        source_attempt: attempt,
+    })
+}
+
+/// Print one run's summary and index it in the store (shared by the plain
+/// and TUI paths, and by every retry attempt).
+async fn report_outcome(spec: &GraphSpec, spec_text: &str, outcome: RunOutcome) {
     println!("\nrun     : {}", outcome.run_id);
+    println!("session : {}", outcome.session_id);
     println!("status  : {:?}", outcome.status);
     println!(
         "tokens  : {} in / {} out   cost: ${:.4}   wall: {}ms",
@@ -536,7 +647,7 @@ async fn run_graph(
         outcome.journal_path.display()
     );
 
-    match index_run(&spec, &spec_text, &outcome).await {
+    match index_run(spec, spec_text, &outcome).await {
         Ok(events) => println!(
             "stored  : run indexed, {events} events mirrored to {}",
             db_path().display()
@@ -549,7 +660,6 @@ async fn run_graph(
     if let Some(text) = outcome.final_text {
         println!("\n================ verified response ================\n{text}");
     }
-    Ok(())
 }
 
 /// Connect the MCP servers a spec's tool.invoke nodes reference (design doc

@@ -87,6 +87,7 @@ mod tests {
                 RunInput {
                     prompt: "How should I structure a falsifiable experiment?".into(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &path,
                 &OfflineEcho,
@@ -112,6 +113,7 @@ mod tests {
                 RunInput {
                     prompt: "Pick a serialization format for run journals.".into(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &path,
                 &OfflineEcho,
@@ -134,6 +136,7 @@ mod tests {
                 RunInput {
                     prompt: "gate me".into(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &path,
                 &OfflineEcho,
@@ -181,6 +184,7 @@ mod tests {
                 RunInput {
                     prompt: "gate me".into(),
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &path,
                 &OfflineEcho,

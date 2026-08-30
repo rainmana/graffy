@@ -133,6 +133,7 @@ pub async fn run_live(
                 RunInput {
                     prompt,
                     session_id: None,
+                    feedback: Vec::new(),
                 },
                 &path_for_task,
                 invoker.as_ref(),
