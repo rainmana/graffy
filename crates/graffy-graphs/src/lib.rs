@@ -10,6 +10,8 @@
 //! Ulysses protocol, collaborative reasoning, …) and adds the skill-adoption
 //! flows (auto / guided / collaborative).
 
+pub mod graphify;
+
 /// The default conversation floor graph — what plain chat runs on.
 pub const DEFAULT_CONVERSATION_TOML: &str =
     include_str!("../../../graphs/conversation.default.toml");

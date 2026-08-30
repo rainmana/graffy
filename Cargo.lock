@@ -1077,7 +1077,9 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "async-trait",
  "graffy-core",
+ "thiserror 2.0.20",
  "tokio",
+ "toml",
 ]
 
 [[package]]

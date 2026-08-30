@@ -78,6 +78,21 @@ enum Command {
         #[command(subcommand)]
         command: GraphCommand,
     },
+    /// Convert a skill (SKILL.md) or raw prompt file into a durable graph —
+    /// the founding invariant: nothing ever executes as raw text.
+    Graphify {
+        /// Path to a SKILL.md / markdown skill or a plain prompt file.
+        path: PathBuf,
+        /// Override the graph name (default: frontmatter, first heading, or file name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Treat the input as a raw prompt even if it looks like markdown.
+        #[arg(long)]
+        prompt: bool,
+        /// Involvement mode: auto (v1) | guided | collaborative (TUI flows, coming).
+        #[arg(long, default_value = "auto")]
+        mode: String,
+    },
     /// Manage MCP servers: add (discovery + facade generation) and list.
     Mcp {
         #[command(subcommand)]
@@ -176,6 +191,12 @@ async fn main() -> anyhow::Result<()> {
             GraphCommand::Export { id, out } => graph_export(id, out).await,
             GraphCommand::Import { path } => graph_import(path).await,
         },
+        Command::Graphify {
+            path,
+            name,
+            prompt,
+            mode,
+        } => graphify_cmd(path, name, prompt, mode).await,
         Command::Mcp { command } => match command {
             McpCommand::Add {
                 name,
@@ -546,6 +567,62 @@ async fn mcp_add(
         "run one   : graffy run graffy.mcp.{}.<tool> --prompt \"…\" [--offline] [--tui]",
         name
     );
+    Ok(())
+}
+
+async fn graphify_cmd(
+    path: PathBuf,
+    name_override: Option<String>,
+    force_prompt: bool,
+    mode: String,
+) -> anyhow::Result<()> {
+    use graffy_graphs::graphify::{self, Mode};
+
+    let Some(mode) = Mode::parse(&mode) else {
+        anyhow::bail!("unknown mode '{mode}' — auto | guided | collaborative");
+    };
+    if mode != Mode::Auto {
+        anyhow::bail!(
+            "the {mode:?} involvement mode lands with the TUI conversion flows — \
+             auto-adopt is available today (--mode auto)"
+        );
+    }
+
+    let raw = std::fs::read_to_string(&path)?;
+    let fallback = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "imported".to_owned());
+
+    let looks_like_skill = !force_prompt
+        && (raw.trim_start().starts_with("---") || raw.contains("\n# ") || raw.starts_with("# "));
+    let spec = if looks_like_skill {
+        let mut doc = graphify::parse_skill_md(&raw, &fallback)?;
+        if let Some(name) = name_override {
+            doc.name = name;
+        }
+        println!("graphifying skill '{}' (auto-adopt)…", doc.name);
+        graphify::graphify_skill(&doc)
+    } else {
+        let name = name_override.unwrap_or(fallback);
+        println!("graphifying prompt '{name}' (auto-adopt)…");
+        graphify::graphify_prompt(&name, &raw)?
+    };
+
+    let toml_text = spec.to_toml_string()?;
+    let store = open_store().await?;
+    let record = store.register_graph(&toml_text, "graphified").await?;
+    println!(
+        "\nregistered '{}' — {} nodes, verified floor (intake → ground → apply → verify → respond)",
+        record.id,
+        spec.nodes.len()
+    );
+    println!("sha256  : {}", record.spec_sha256);
+    println!(
+        "run it  : graffy run {} --prompt \"…\" [--offline] [--tui]",
+        record.id
+    );
+    println!("share it: graffy graph export {}", record.id);
     Ok(())
 }
 
