@@ -1,8 +1,16 @@
-//! Guided graphification (founding tier two): render a *generated, not yet
-//! registered* graph spec for human review. Accept registers it, rename
-//! adjusts the display name, reject discards it — nothing persists until a
-//! human says so. Collaborative (node-by-node co-design) is tier three and
-//! builds on this surface.
+//! Graph review — tiers two and three of the founding design.
+//!
+//! * **Guided** (`collaborative = false`): inspect the generated-but-
+//!   unregistered graph; rename it; accept or reject. Nothing persists until
+//!   a human accepts; reject leaves no trace.
+//! * **Collaborative** (`collaborative = true`): everything guided offers,
+//!   plus live co-design of the selected node — edit its description
+//!   inline, cycle its routing tier, and open its system knowledge in
+//!   `$EDITOR` (suspending the TUI, the terminal-native way). Structural
+//!   edits (adding/removing nodes and edges) are the next increment.
+//!
+//! Accept runs the cycle-guard compiler first: an edit that would produce an
+//! unlawful graph cannot be registered — the error shows in the footer.
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind};
@@ -13,64 +21,93 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::{DefaultTerminal, Frame};
 use std::time::Duration;
 
+use graffy_core::graph::CompiledGraph;
 use graffy_core::spec::GraphSpec;
 
-/// The human's verdict on a previewed spec.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PreviewDecision {
+/// The human's verdict. Edits (collaborative) are applied to the spec in
+/// place before this is returned; Reject discards everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewDecision {
     Accept,
-    /// Accept with a new display name (the id stays stable).
-    AcceptRenamed(String),
     Reject,
 }
 
-struct PreviewState {
-    list: ListState,
-    scroll: u16,
-    renaming: bool,
-    buffer: String,
-    renamed: Option<String>,
+/// Cycle a node's routing tier: none → fast → balanced → frontier → none.
+/// Unknown custom tiers clear first, then cycle the standard ladder.
+pub fn next_tier(current: Option<&str>) -> Option<String> {
+    match current {
+        None => Some("fast".to_owned()),
+        Some("fast") => Some("balanced".to_owned()),
+        Some("balanced") => Some("frontier".to_owned()),
+        Some("frontier") => None,
+        Some(_) => None,
+    }
 }
 
-/// Open the review TUI for a generated spec. Returns the decision; nothing
-/// is registered by this function under any outcome.
-pub fn preview_spec(spec: &GraphSpec) -> Result<PreviewDecision> {
-    let mut state = PreviewState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditTarget {
+    GraphName,
+    NodeDescription,
+}
+
+struct ReviewState {
+    list: ListState,
+    scroll: u16,
+    editing: Option<EditTarget>,
+    buffer: String,
+    error: Option<String>,
+    dirty: bool,
+}
+
+/// Open the review TUI. Guided allows rename only; collaborative allows
+/// node-level co-design. Nothing is registered by this function.
+pub fn review_spec(spec: &mut GraphSpec, collaborative: bool) -> Result<ReviewDecision> {
+    let mut state = ReviewState {
         list: ListState::default(),
         scroll: 0,
-        renaming: false,
+        editing: None,
         buffer: String::new(),
-        renamed: None,
+        error: None,
+        dirty: false,
     };
     state.list.select(Some(0));
 
     let mut terminal = ratatui::init();
-    let result = preview_loop(&mut terminal, spec, &mut state);
+    let result = review_loop(&mut terminal, spec, collaborative, &mut state);
     ratatui::restore();
     result
 }
 
-fn preview_loop(
+fn review_loop(
     terminal: &mut DefaultTerminal,
-    spec: &GraphSpec,
-    state: &mut PreviewState,
-) -> Result<PreviewDecision> {
+    spec: &mut GraphSpec,
+    collaborative: bool,
+    state: &mut ReviewState,
+) -> Result<ReviewDecision> {
     loop {
-        terminal.draw(|f| draw(f, spec, state))?;
+        terminal.draw(|f| draw(f, spec, collaborative, state))?;
         if event::poll(Duration::from_millis(100))?
             && let TermEvent::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
-            if state.renaming {
+            if let Some(target) = state.editing {
                 match key.code {
                     KeyCode::Enter => {
-                        let trimmed = state.buffer.trim();
-                        if !trimmed.is_empty() {
-                            state.renamed = Some(trimmed.to_owned());
+                        let value = state.buffer.trim().to_owned();
+                        if !value.is_empty() {
+                            match target {
+                                EditTarget::GraphName => spec.graph.name = value,
+                                EditTarget::NodeDescription => {
+                                    if let Some(node) = selected_node_mut(spec, &state.list) {
+                                        node.description = value;
+                                    }
+                                }
+                            }
+                            state.dirty = true;
                         }
-                        state.renaming = false;
+                        state.editing = None;
                     }
-                    KeyCode::Esc => state.renaming = false,
+                    KeyCode::Esc => state.editing = None,
                     KeyCode::Backspace => {
                         state.buffer.pop();
                     }
@@ -81,20 +118,54 @@ fn preview_loop(
             }
             match key.code {
                 KeyCode::Char('a') | KeyCode::Enter => {
-                    return Ok(match state.renamed.take() {
-                        Some(name) => PreviewDecision::AcceptRenamed(name),
-                        None => PreviewDecision::Accept,
-                    });
+                    // The compiler is the gate: unlawful edits cannot land.
+                    match CompiledGraph::compile(spec) {
+                        Ok(_) => return Ok(ReviewDecision::Accept),
+                        Err(err) => state.error = Some(err.to_string()),
+                    }
                 }
                 KeyCode::Char('r') | KeyCode::Char('q') | KeyCode::Esc => {
-                    return Ok(PreviewDecision::Reject);
+                    return Ok(ReviewDecision::Reject);
                 }
-                KeyCode::Char('e') => {
-                    state.buffer = state
-                        .renamed
-                        .clone()
-                        .unwrap_or_else(|| spec.graph.name.clone());
-                    state.renaming = true;
+                KeyCode::Char('n') => {
+                    state.buffer = spec.graph.name.clone();
+                    state.editing = Some(EditTarget::GraphName);
+                }
+                KeyCode::Char('d') if collaborative => {
+                    if let Some(node) = selected_node_mut(spec, &state.list) {
+                        state.buffer = node.description.clone();
+                        state.editing = Some(EditTarget::NodeDescription);
+                    }
+                }
+                KeyCode::Char('t') if collaborative => {
+                    if let Some(node) = selected_node_mut(spec, &state.list) {
+                        node.model_tier = next_tier(node.model_tier.as_deref());
+                        state.dirty = true;
+                    }
+                }
+                KeyCode::Char('s') if collaborative => {
+                    let is_model = selected_node_mut(spec, &state.list)
+                        .map(|n| n.kind == "model")
+                        .unwrap_or(false);
+                    if is_model {
+                        let initial = selected_node_mut(spec, &state.list)
+                            .and_then(|n| {
+                                n.params
+                                    .get("system")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned)
+                            })
+                            .unwrap_or_default();
+                        if let Some(edited) = edit_in_editor(terminal, &initial)?
+                            && let Some(node) = selected_node_mut(spec, &state.list)
+                        {
+                            node.params.insert(
+                                "system".to_owned(),
+                                toml::Value::String(edited.trim_end().to_owned()),
+                            );
+                            state.dirty = true;
+                        }
+                    }
                 }
                 KeyCode::Up => select_delta(&mut state.list, spec.nodes.len(), -1),
                 KeyCode::Down => select_delta(&mut state.list, spec.nodes.len(), 1),
@@ -110,6 +181,42 @@ fn preview_loop(
     }
 }
 
+/// Suspend the TUI, open `$VISUAL`/`$EDITOR` (default `vi`) on the text,
+/// resume, and return the edited content (None on editor failure/abort).
+fn edit_in_editor(terminal: &mut DefaultTerminal, initial: &str) -> Result<Option<String>> {
+    ratatui::restore();
+    let path = std::env::temp_dir().join(format!(
+        "graffy-edit-{}-{}.md",
+        std::process::id(),
+        graffy_core::id::RunId::generate()
+    ));
+    std::fs::write(&path, initial)?;
+    let editor_cmd = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_owned());
+    let mut parts = editor_cmd.split_whitespace();
+    let program = parts.next().unwrap_or("vi").to_owned();
+    let args: Vec<String> = parts.map(str::to_owned).collect();
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .arg(&path)
+        .status();
+    let edited = match status {
+        Ok(s) if s.success() => Some(std::fs::read_to_string(&path)?),
+        _ => None,
+    };
+    std::fs::remove_file(&path).ok();
+    *terminal = ratatui::init();
+    Ok(edited)
+}
+
+fn selected_node_mut<'a>(
+    spec: &'a mut GraphSpec,
+    list: &ListState,
+) -> Option<&'a mut graffy_core::spec::NodeSpec> {
+    list.selected().and_then(|i| spec.nodes.get_mut(i))
+}
+
 fn select_delta(list: &mut ListState, len: usize, delta: i64) {
     if len == 0 {
         return;
@@ -119,7 +226,7 @@ fn select_delta(list: &mut ListState, len: usize, delta: i64) {
     list.select(Some(next));
 }
 
-fn draw(f: &mut Frame, spec: &GraphSpec, state: &mut PreviewState) {
+fn draw(f: &mut Frame, spec: &GraphSpec, collaborative: bool, state: &mut ReviewState) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(5),
@@ -127,17 +234,26 @@ fn draw(f: &mut Frame, spec: &GraphSpec, state: &mut PreviewState) {
     ])
     .areas(f.area());
 
-    let shown_name = state.renamed.as_deref().unwrap_or(&spec.graph.name);
+    let mode_label = if collaborative {
+        " collaborative review "
+    } else {
+        " guided review "
+    };
     let title = Line::from(vec![
         Span::styled(
-            " guided review ",
+            mode_label,
             Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("▸ {shown_name} ")),
+        Span::raw(format!("▸ {} ", spec.graph.name)),
         Span::styled(
             format!("({} · v{})", spec.graph.id, spec.graph.version),
             Style::new().fg(Color::DarkGray),
         ),
+        if state.dirty {
+            Span::styled(" · edited", Style::new().fg(Color::Cyan))
+        } else {
+            Span::raw("")
+        },
     ]);
     let status = Line::from(Span::styled(
         " nothing is registered yet — this graph exists only on this screen",
@@ -231,26 +347,58 @@ fn draw(f: &mut Frame, spec: &GraphSpec, state: &mut PreviewState) {
         right,
     );
 
-    let footer_line = if state.renaming {
+    let footer_line = if let Some(target) = state.editing {
+        let label = match target {
+            EditTarget::GraphName => "rename graph",
+            EditTarget::NodeDescription => "edit description",
+        };
         Line::from(vec![
-            Span::styled(" rename: ", Style::new().fg(Color::Yellow)),
+            Span::styled(format!(" {label}: "), Style::new().fg(Color::Yellow)),
             Span::raw(format!("{}▏", state.buffer)),
             Span::styled(
                 "   Enter save · Esc cancel",
                 Style::new().fg(Color::DarkGray),
             ),
         ])
+    } else if let Some(err) = &state.error {
+        Line::from(Span::styled(
+            format!(" cannot register: {err}"),
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+    } else if collaborative {
+        Line::from(Span::styled(
+            " [a] accept · [r]/q reject · [n] rename · [d] description · [t] tier · [s] system in $EDITOR (model nodes) · ↑↓ · j/k",
+            Style::new().fg(Color::DarkGray),
+        ))
     } else {
         Line::from(Span::styled(
-            " [a]/Enter accept & register · [e] rename · [r]/q reject · ↑↓ node · j/k scroll",
+            " [a]/Enter accept & register · [n] rename · [r]/q reject · ↑↓ node · j/k scroll",
             Style::new().fg(Color::DarkGray),
         ))
     };
     let hint = Line::from(Span::styled(
-        " guided mode: you are the gate — accept registers, reject leaves no trace",
+        if collaborative {
+            " collaborative mode: co-design the graph, then you are the gate — the compiler blocks unlawful edits"
+        } else {
+            " guided mode: you are the gate — accept registers, reject leaves no trace"
+        },
         Style::new()
             .fg(Color::Yellow)
             .add_modifier(Modifier::ITALIC),
     ));
     f.render_widget(Paragraph::new(vec![footer_line, hint]), footer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_tier;
+
+    #[test]
+    fn tier_cycles_standard_ladder_and_clears_custom() {
+        assert_eq!(next_tier(None).as_deref(), Some("fast"));
+        assert_eq!(next_tier(Some("fast")).as_deref(), Some("balanced"));
+        assert_eq!(next_tier(Some("balanced")).as_deref(), Some("frontier"));
+        assert_eq!(next_tier(Some("frontier")), None);
+        assert_eq!(next_tier(Some("my-custom-tier")), None);
+    }
 }

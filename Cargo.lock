@@ -1146,6 +1146,7 @@ dependencies = [
  "graffy-proto",
  "ratatui",
  "tokio",
+ "toml",
 ]
 
 [[package]]

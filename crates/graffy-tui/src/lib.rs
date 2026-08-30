@@ -12,5 +12,5 @@ pub mod preview;
 pub mod state;
 pub mod ui;
 
-pub use preview::{PreviewDecision, preview_spec};
+pub use preview::{ReviewDecision, review_spec};
 pub use ui::{run_home, run_live, run_replay};

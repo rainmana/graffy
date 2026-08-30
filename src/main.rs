@@ -581,12 +581,6 @@ async fn graphify_cmd(
     let Some(mode) = Mode::parse(&mode) else {
         anyhow::bail!("unknown mode '{mode}' — auto | guided | collaborative");
     };
-    if mode == Mode::Collaborative {
-        anyhow::bail!(
-            "collaborative mode (node-by-node co-design) is the next TUI flow — \
-             auto and guided are available today"
-        );
-    }
 
     let raw = std::fs::read_to_string(&path)?;
     let fallback = path
@@ -596,34 +590,31 @@ async fn graphify_cmd(
 
     let looks_like_skill = !force_prompt
         && (raw.trim_start().starts_with("---") || raw.contains("\n# ") || raw.starts_with("# "));
-    let spec = if looks_like_skill {
+    let mut spec = if looks_like_skill {
         let mut doc = graphify::parse_skill_md(&raw, &fallback)?;
         if let Some(name) = name_override {
             doc.name = name;
         }
-        println!("graphifying skill '{}' (auto-adopt)…", doc.name);
+        println!("graphifying skill '{}' ({mode:?})…", doc.name);
         graphify::graphify_skill(&doc)
     } else {
         let name = name_override.unwrap_or(fallback);
-        println!("graphifying prompt '{name}' (auto-adopt)…");
+        println!("graphifying prompt '{name}' ({mode:?})…");
         graphify::graphify_prompt(&name, &raw)?
     };
 
-    let mut spec = spec;
-    if mode == Mode::Guided {
-        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            match graffy_tui::preview_spec(&spec)? {
-                graffy_tui::PreviewDecision::Reject => {
+    if mode != Mode::Auto {
+        let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+        if interactive {
+            let collaborative = mode == Mode::Collaborative;
+            match graffy_tui::review_spec(&mut spec, collaborative)? {
+                graffy_tui::ReviewDecision::Reject => {
                     println!("rejected in review — nothing was registered.");
                     return Ok(());
                 }
-                graffy_tui::PreviewDecision::Accept => {}
-                graffy_tui::PreviewDecision::AcceptRenamed(name) => {
-                    println!("renamed to '{name}' (id stays stable)");
-                    spec.graph.name = name;
-                }
+                graffy_tui::ReviewDecision::Accept => {}
             }
-        } else {
+        } else if mode == Mode::Guided {
             // Plain-terminal parity: show the exact TOML, ask, EOF rejects.
             println!("\n===== generated graph (nothing registered yet) =====\n");
             println!("{}", spec.to_toml_string()?);
@@ -632,6 +623,11 @@ async fn graphify_cmd(
                 println!("rejected — nothing was registered.");
                 return Ok(());
             }
+        } else {
+            anyhow::bail!(
+                "collaborative mode needs an interactive terminal (guided mode has piped \
+                 parity: it prints the TOML and asks y/N)"
+            );
         }
     }
 

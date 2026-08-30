@@ -68,6 +68,11 @@ Goal: a stranger can watch a prompt refuse to run raw.
 
 ## Tabled by request (post-Phase-1, recorded so they cannot get lost)
 
+- **Signed + notarized macOS releases**: @rainmana holds a paid Apple Developer
+  membership; wire Developer ID Application signing (`codesign`) and notarization
+  (`notarytool` submit + staple) into the release workflow via GitHub secrets so
+  downloads run without Gatekeeper exceptions. Parked by request — the unsigned
+  binary is field-verified working on macOS as of v0.1.0-alpha.3.
 - **Brand & visual identity**: exploratory brand/theme work for graffy already exists from
   side efforts (logo routes, palettes, light/dark mode studies). Not integrated anywhere yet —
   when the theme engine lands, that work is the natural seed for graffy's default identity
