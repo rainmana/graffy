@@ -46,6 +46,15 @@ pub enum ModelError {
     Provider(String),
 }
 
+/// Errors from a tool invoker (the MCP plane, or a mock in tests).
+#[derive(Debug, Error)]
+pub enum ToolError {
+    #[error("no tool invoker configured: {0}")]
+    Unavailable(String),
+    #[error("tool call failed: {0}")]
+    Call(String),
+}
+
 /// Errors during graph execution.
 #[derive(Debug, Error)]
 pub enum ExecError {
@@ -57,6 +66,8 @@ pub enum ExecError {
     Journal(#[from] JournalError),
     #[error(transparent)]
     Model(#[from] ModelError),
+    #[error(transparent)]
+    Tool(#[from] ToolError),
     #[error("no behavior registered for node kind '{0}'")]
     UnknownNodeKind(String),
     #[error("guard expression '{expr}' is malformed: {reason}")]

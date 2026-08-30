@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use graffy_proto::mcw::v1 as mcw;
 use graffy_proto::prost_types;
 
-use crate::error::{ExecError, ModelError};
+use crate::error::{ExecError, ModelError, ToolError};
 use crate::graph::{CompiledGraph, CompiledNode};
 use crate::id::{EvidenceId, IuId, RunId, SessionId};
 use crate::journal::{JournalWriter, wire};
@@ -273,6 +273,144 @@ impl ApprovalHandler for AutoApprove {
 }
 
 // ---------------------------------------------------------------------------
+// The tool plane (trait only — the rmcp implementation lives in graffy-mcp)
+// ---------------------------------------------------------------------------
+
+/// What a tool call returns to the graph.
+#[derive(Debug, Clone)]
+pub struct ToolResponse {
+    /// Concatenated text content of the result.
+    pub text: String,
+    /// The server flagged this result as an error.
+    pub is_error: bool,
+    pub latency_ms: u64,
+}
+
+/// The only doorway to external tools. Implementations parse `args_json`
+/// (facade prepare nodes emit it); unparseable input must be wrapped as
+/// `{"input": <raw>}` rather than guessed at (ADR-0005 discipline applies to
+/// tools exactly as it does to models). rmcp-backed implementation arrives
+/// with graffy-mcp; tests use mocks.
+#[async_trait::async_trait]
+pub trait ToolInvoker: Send + Sync {
+    async fn invoke(
+        &self,
+        server: &str,
+        tool: &str,
+        args_json: &str,
+    ) -> Result<ToolResponse, ToolError>;
+}
+
+/// `tool.invoke` — the transport half of an MCP facade (docs/design/
+/// phase-2-mcp.md §2). No prompting, no interpretation: reads the latest
+/// `tool-args` IU, calls the tool plane, and records the result as a
+/// hash-addressed MCP_RESULT evidence artifact plus a `tool-result` IU.
+struct ToolInvokeNode;
+
+#[async_trait::async_trait]
+impl NodeBehavior for ToolInvokeNode {
+    async fn execute(&self, ctx: &mut NodeCtx<'_>) -> Result<NodeExecutionResult, ExecError> {
+        let Some(invoker) = ctx.tool_invoker else {
+            return Err(ExecError::Tool(ToolError::Unavailable(
+                "this graph has a tool.invoke node but no tool plane is configured \
+                 (register an MCP server, or pass a mock in tests)"
+                    .to_owned(),
+            )));
+        };
+        let server = ctx.param_str("server").ok_or_else(|| {
+            ExecError::NodeFailed(ctx.node.id.clone(), "missing param 'server'".to_owned())
+        })?;
+        let tool = ctx.param_str("tool").ok_or_else(|| {
+            ExecError::NodeFailed(ctx.node.id.clone(), "missing param 'tool'".to_owned())
+        })?;
+        let args_json = ctx
+            .ledger
+            .iter()
+            .rev()
+            .find(|iu| iu.attributes.get("role").is_some_and(|r| r == "tool-args"))
+            .map(|iu| iu.payload_text.clone())
+            .unwrap_or_else(|| "{}".to_owned());
+
+        let started = Instant::now();
+        let result = invoker.invoke(&server, &tool, &args_json).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let tool_name = format!("{server}/{tool}");
+
+        let response = match result {
+            Err(err) => {
+                ctx.records.push(Event::ToolCall(wire::ToolCallRecord {
+                    node_id: ctx.node.id.clone(),
+                    origin: wire::ToolOrigin::Mcp as i32,
+                    tool_name,
+                    args_sha256: sha256_hex(args_json.as_bytes()),
+                    result_evidence_id: String::new(),
+                    latency_ms,
+                    success: false,
+                    error: err.to_string(),
+                }));
+                return Err(ExecError::Tool(err));
+            }
+            Ok(response) => response,
+        };
+
+        let mut out = NodeOutput::default();
+        let evidence_id = EvidenceId::generate().to_string();
+        let level = match ctx.param_str("evidence_level").as_deref() {
+            Some("L2") => mcw::EvidenceLevel::L2Empirical,
+            Some("L0") => mcw::EvidenceLevel::L0Definitional,
+            _ => mcw::EvidenceLevel::L1Observational,
+        };
+        out.evidence.push(mcw::EvidenceArtifact {
+            id: evidence_id.clone(),
+            kind: mcw::EvidenceKind::McpResult as i32,
+            uri: format!("graffy://run/{}/node/{}/mcp", ctx.run_id, ctx.node.id),
+            content_hash: sha256_hex(response.text.as_bytes()),
+            collected_at: Some(now_ts()),
+            producer: Some(node_actor(&ctx.node.id)),
+            run_id: ctx.run_id.to_owned(),
+            summary: format!("MCP result from {tool_name}"),
+            level: level as i32,
+            user_visible: ctx.evidence_visible,
+        });
+        ctx.records.push(Event::ToolCall(wire::ToolCallRecord {
+            node_id: ctx.node.id.clone(),
+            origin: wire::ToolOrigin::Mcp as i32,
+            tool_name: tool_name.clone(),
+            args_sha256: sha256_hex(args_json.as_bytes()),
+            result_evidence_id: evidence_id.clone(),
+            latency_ms: response.latency_ms.max(latency_ms),
+            success: !response.is_error,
+            error: String::new(),
+        }));
+
+        let mut attributes = HashMap::new();
+        attributes.insert("role".to_owned(), "tool-result".to_owned());
+        attributes.insert("tool".to_owned(), tool_name);
+        out.ius.push(mcw::InformationUnit {
+            id: IuId::generate().to_string(),
+            kind: mcw::IuKind::Other as i32,
+            payload_text: response.text.clone(),
+            created_at: Some(now_ts()),
+            source: Some(node_actor(&ctx.node.id)),
+            session_id: ctx.session_id.to_owned(),
+            run_id: ctx.run_id.to_owned(),
+            stages: five_stage_records(node_actor(&ctx.node.id), node_actor(&ctx.node.id), "text"),
+            salience: 0.8,
+            evidence_ids: vec![evidence_id],
+            evidence_level: level as i32,
+            attributes,
+            ..Default::default()
+        });
+        out.guard_facts
+            .insert("invoked".to_owned(), "true".to_owned());
+        out.guard_facts
+            .insert("tool.ok".to_owned(), (!response.is_error).to_string());
+        out.text = Some(response.text);
+        Ok(NodeExecutionResult::Continue(out))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Node behaviors
 // ---------------------------------------------------------------------------
 
@@ -323,6 +461,8 @@ pub struct NodeCtx<'a> {
     /// Evidence policy: whether artifacts surface in the UI (strict) or stay
     /// journal-only (trace-only).
     pub evidence_visible: bool,
+    /// The tool plane, when configured (MCP servers, or a mock in tests).
+    pub tool_invoker: Option<&'a dyn ToolInvoker>,
     /// Journal events the behavior wants recorded (model calls, routing…).
     pub records: Vec<Event>,
 }
@@ -421,6 +561,7 @@ impl NodeRegistry {
         registry.register("verify", Arc::new(VerifyNode));
         registry.register("respond", Arc::new(RespondNode));
         registry.register("approval", Arc::new(ApprovalNode));
+        registry.register("tool.invoke", Arc::new(ToolInvokeNode));
         registry
     }
 
@@ -543,13 +684,36 @@ impl NodeBehavior for ModelNode {
              do not invent facts. Where you are uncertain, say so explicitly."
                 .to_owned()
         });
-        let prompt = if feedback.is_empty() {
+        let mut context_sections: Vec<String> = Vec::new();
+        if let Some(roles) = ctx.param_str("context_roles") {
+            for role in roles.split(',').map(str::trim).filter(|r| !r.is_empty()) {
+                if let Some(iu) = ctx
+                    .ledger
+                    .iter()
+                    .rev()
+                    .find(|iu| iu.attributes.get("role").is_some_and(|r| r == role))
+                {
+                    context_sections.push(format!("[{role}]\n{}", iu.payload_text));
+                }
+            }
+        }
+        let prompt = if feedback.is_empty() && context_sections.is_empty() {
             goal
         } else {
-            format!(
-                "{goal}\n\nRevise your previous draft, addressing this review feedback:\n{}",
-                feedback.join("\n---\n")
-            )
+            let mut assembled = goal;
+            if !context_sections.is_empty() {
+                assembled = format!(
+                    "{assembled}\n\nContext from prior steps:\n{}",
+                    context_sections.join("\n---\n")
+                );
+            }
+            if !feedback.is_empty() {
+                assembled = format!(
+                    "{assembled}\n\nRevise your previous draft, addressing this review feedback:\n{}",
+                    feedback.join("\n---\n")
+                );
+            }
+            assembled
         };
 
         let response = ctx.call_model("draft", system, prompt).await?;
@@ -572,7 +736,10 @@ impl NodeBehavior for ModelNode {
             user_visible: ctx.evidence_visible,
         });
         let mut attributes = HashMap::new();
-        attributes.insert("role".to_owned(), "draft".to_owned());
+        let iu_role = ctx
+            .param_str("iu_role")
+            .unwrap_or_else(|| "draft".to_owned());
+        attributes.insert("role".to_owned(), iu_role);
         attributes.insert(
             "model".to_owned(),
             format!("{}:{}", response.provider, response.model),
@@ -768,6 +935,9 @@ pub struct Executor {
     pub max_node_visits: u32,
     /// Optional live mirror of committed journal frames (the TUI's feed).
     pub event_tap: Option<crate::journal::EventTap>,
+    /// The tool plane (MCP servers via graffy-mcp). `tool.invoke` nodes fail
+    /// loudly without one — graffy never pretends a tool exists.
+    pub tool_invoker: Option<Arc<dyn ToolInvoker>>,
 }
 
 impl Default for Executor {
@@ -776,6 +946,7 @@ impl Default for Executor {
             registry: NodeRegistry::with_defaults(),
             max_node_visits: 3,
             event_tap: None,
+            tool_invoker: None,
         }
     }
 }
@@ -916,6 +1087,7 @@ impl Executor {
                 policy: &spec.policy,
                 invoker,
                 evidence_visible,
+                tool_invoker: self.tool_invoker.as_deref(),
                 records: Vec::new(),
             };
             let result = behavior.execute(&mut ctx).await;
@@ -1227,6 +1399,156 @@ mod tests {
                 latency_ms: 0,
             })
         }
+    }
+
+    /// Scripted tool plane for facade tests.
+    struct MockTool;
+
+    #[async_trait::async_trait]
+    impl ToolInvoker for MockTool {
+        async fn invoke(
+            &self,
+            server: &str,
+            tool: &str,
+            args_json: &str,
+        ) -> Result<ToolResponse, ToolError> {
+            Ok(ToolResponse {
+                text: format!("mock result from {server}/{tool} for args {args_json}"),
+                is_error: false,
+                latency_ms: 1,
+            })
+        }
+    }
+
+    const FACADE_FIXTURE: &str = r#"
+        [graph]
+        id = "t.facade"
+        name = "Facade fixture"
+        version = "0.0.1"
+
+        [[node]]
+        id = "intake"
+        kind = "intake"
+
+        [[node]]
+        id = "prepare"
+        kind = "model"
+        model_tier = "fast"
+        [node.params]
+        iu_role = "tool-args"
+        system = "Emit ONLY a JSON object of arguments for the tool."
+
+        [[node]]
+        id = "invoke"
+        kind = "tool.invoke"
+        [node.params]
+        server = "testsrv"
+        tool = "echo"
+        evidence_level = "L2"
+
+        [[node]]
+        id = "digest"
+        kind = "model"
+        model_tier = "fast"
+        [node.params]
+        iu_role = "draft"
+        context_roles = "tool-result"
+        system = "Turn the tool result into a grounded answer."
+
+        [[node]]
+        id = "respond"
+        kind = "respond"
+
+        [[edge]]
+        from = "intake"
+        to = "prepare"
+
+        [[edge]]
+        from = "prepare"
+        to = "invoke"
+
+        [[edge]]
+        from = "invoke"
+        to = "digest"
+        when = "tool.ok == 'true'"
+
+        [[edge]]
+        from = "digest"
+        to = "respond"
+    "#;
+
+    #[tokio::test]
+    async fn facade_pipeline_invokes_tool_and_grounds_the_answer() {
+        let spec = GraphSpec::from_toml_str(FACADE_FIXTURE).unwrap();
+        let journal_path = temp_path("facade");
+        let executor = Executor {
+            tool_invoker: Some(Arc::new(MockTool)),
+            ..Default::default()
+        };
+        let outcome = executor
+            .run(
+                &spec,
+                FACADE_FIXTURE,
+                RunInput {
+                    prompt: "look something up".to_owned(),
+                    session_id: None,
+                },
+                &journal_path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await
+            .expect("facade run must succeed with a mock tool plane");
+        assert_eq!(outcome.status, wire::RunStatus::Succeeded);
+        let final_text = outcome.final_text.expect("digest draft becomes the answer");
+        assert!(final_text.contains("mock result from testsrv/echo"));
+
+        let events = crate::journal::JournalReader::read_all(&journal_path).unwrap();
+        let tool_calls: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Some(Event::ToolCall(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].success);
+        assert_eq!(tool_calls[0].tool_name, "testsrv/echo");
+        assert!(!tool_calls[0].result_evidence_id.is_empty());
+        let mcp_evidence = events.iter().any(|e| {
+            matches!(
+                &e.event,
+                Some(Event::EvidenceRecorded(a))
+                    if a.kind == mcw::EvidenceKind::McpResult as i32
+                        && a.level == mcw::EvidenceLevel::L2Empirical as i32
+            )
+        });
+        assert!(mcp_evidence, "MCP result must land as L2 evidence");
+        std::fs::remove_file(&journal_path).ok();
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_without_a_tool_plane_fails_loudly() {
+        let spec = GraphSpec::from_toml_str(FACADE_FIXTURE).unwrap();
+        let journal_path = temp_path("facade-noplane");
+        let result = Executor::default()
+            .run(
+                &spec,
+                FACADE_FIXTURE,
+                RunInput {
+                    prompt: "look something up".to_owned(),
+                    session_id: None,
+                },
+                &journal_path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(ExecError::Tool(crate::error::ToolError::Unavailable(_)))
+        ));
+        std::fs::remove_file(&journal_path).ok();
     }
 
     #[tokio::test]

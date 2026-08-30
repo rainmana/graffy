@@ -93,7 +93,18 @@ CREATE TABLE IF NOT EXISTS run_events (
   PRIMARY KEY (run_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_events_kind ON run_events(run_id, kind);
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  name           TEXT PRIMARY KEY,
+  transport      TEXT NOT NULL,
+  command        TEXT NOT NULL,
+  args           TEXT NOT NULL DEFAULT '',
+  role_default   TEXT NOT NULL DEFAULT 'effector',
+  evidence_level TEXT NOT NULL DEFAULT 'L1',
+  tools_json     TEXT NOT NULL DEFAULT '[]',
+  added_at       INTEGER NOT NULL
+);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');
+INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2');
 "#;
 
 /// An installed graph, as stored.
@@ -127,6 +138,26 @@ pub struct RunRecord {
     pub total_usd: f64,
     pub journal_path: String,
     pub spec_sha256: String,
+}
+
+/// A registered MCP server (transport binding lives here, never in specs —
+/// docs/design/phase-2-mcp.md §5).
+#[derive(Debug, Clone)]
+pub struct McpServerRecord {
+    pub name: String,
+    /// "stdio" | "http" (http wiring lands in the next slice).
+    pub transport: String,
+    /// Executable (stdio) or URL (http).
+    pub command: String,
+    /// Space-separated argv tail for stdio servers.
+    pub args: String,
+    /// Default role for tools lacking annotations: "evidence" | "effector".
+    pub role_default: String,
+    /// Evidence level granted to this server's results (L0–L2).
+    pub evidence_level: String,
+    /// Cached discovery metadata (JSON array of tools).
+    pub tools_json: String,
+    pub added_at: i64,
 }
 
 /// The embedded store. One per data dir; open is idempotent and migrating.
@@ -369,6 +400,60 @@ impl Store {
         Ok(out)
     }
 
+    /// Register (upsert) an MCP server binding.
+    pub async fn add_mcp_server(&self, server: &McpServerRecord) -> Result<(), MemoryError> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO mcp_servers
+                   (name, transport, command, args, role_default, evidence_level,
+                    tools_json, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                libsql::params![
+                    server.name.clone(),
+                    server.transport.clone(),
+                    server.command.clone(),
+                    server.args.clone(),
+                    server.role_default.clone(),
+                    server.evidence_level.clone(),
+                    server.tools_json.clone(),
+                    server.added_at,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_mcp_servers(&self) -> Result<Vec<McpServerRecord>, MemoryError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT name, transport, command, args, role_default, evidence_level,
+                        tools_json, added_at
+                 FROM mcp_servers ORDER BY name",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(McpServerRecord {
+                name: row.get::<String>(0)?,
+                transport: row.get::<String>(1)?,
+                command: row.get::<String>(2)?,
+                args: row.get::<String>(3)?,
+                role_default: row.get::<String>(4)?,
+                evidence_level: row.get::<String>(5)?,
+                tools_json: row.get::<String>(6)?,
+                added_at: row.get::<i64>(7)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn get_mcp_server(&self, name: &str) -> Result<Option<McpServerRecord>, MemoryError> {
+        let servers = self.list_mcp_servers().await?;
+        Ok(servers.into_iter().find(|s| s.name == name))
+    }
+
     /// Counts for `graffy doctor`.
     pub async fn stats(&self) -> Result<(u64, u64, u64), MemoryError> {
         let graphs = self.count("SELECT COUNT(*) FROM graphs").await?;
@@ -484,6 +569,32 @@ mod tests {
         let second = store.seed_builtins(&builtins).await.unwrap();
         assert_eq!(second, 0, "unchanged built-ins must not reseed");
         assert_eq!(store.list_graphs().await.unwrap().len(), builtins.len());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn mcp_server_registry_roundtrip() {
+        let path = temp_db("mcp");
+        let store = Store::open(&path).await.unwrap();
+        store
+            .add_mcp_server(&McpServerRecord {
+                name: "everything".into(),
+                transport: "stdio".into(),
+                command: "npx".into(),
+                args: "-y @modelcontextprotocol/server-everything".into(),
+                role_default: "evidence".into(),
+                evidence_level: "L1".into(),
+                tools_json: "[]".into(),
+                added_at: 1_700_000_000,
+            })
+            .await
+            .unwrap();
+        let servers = store.list_mcp_servers().await.unwrap();
+        assert_eq!(servers.len(), 1);
+        let fetched = store.get_mcp_server("everything").await.unwrap().unwrap();
+        assert_eq!(fetched.transport, "stdio");
+        assert_eq!(fetched.role_default, "evidence");
+        assert!(store.get_mcp_server("ghost").await.unwrap().is_none());
         std::fs::remove_file(&path).ok();
     }
 

@@ -62,7 +62,8 @@ ratatui = "0.30"
 crossterm = "0.29"
 
 # --- pinned now, wired in later phases ---
-rmcp = "3.1"             # official Rust MCP SDK — graffy-mcp, Phase 2
+rmcp = { version = "3.1", default-features = false, features = ["client", "transport-child-process", "transport-io"] } # official Rust MCP SDK — graffy-mcp
+serde_json = "1.0"       # MCP tool arguments/results (graffy-mcp)
 fastembed = "6.0"        # local ONNX embeddings — graffy-memory, Phase 3
 
 # ============================================================================
