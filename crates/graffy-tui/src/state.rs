@@ -208,8 +208,13 @@ impl AppState {
                 let kind = iu_kind_word(iu.kind);
                 self.feed(seq, format!("{node}: IU recorded ({kind})"));
                 let mut body = vec![
-                    format!("kind     : {kind}   salience: {:.2}", iu.salience),
-                    format!("level    : {}", evidence_level_word(iu.evidence_level)),
+                    format!(
+                        "kind     : {kind}   salience: {}",
+                        iu.salience
+                            .map(|s| format!("{s:.2} ({})", iu.salience_source))
+                            .unwrap_or_else(|| "unmeasured".to_owned())
+                    ),
+                    format!("support  : {}", evidence_level_word(iu.support_ceiling)),
                 ];
                 body.extend(wrap_payload("payload  : ", &iu.payload_text));
                 if !iu.evidence_ids.is_empty() {
@@ -267,7 +272,12 @@ impl AppState {
                     seq,
                     format!("failure — {}", failure_mode_word(f.mode)),
                     vec![
-                        format!("confidence: {:.2}", f.confidence),
+                        format!(
+                            "confidence: {}",
+                            f.confidence
+                                .map(|v| format!("{v:.2}"))
+                                .unwrap_or_else(|| "uncalibrated hypothesis".to_owned())
+                        ),
                         format!("signal    : {}", f.early_signal),
                     ],
                 );
@@ -471,12 +481,12 @@ fn evidence_kind_word(kind: i32) -> &'static str {
 }
 
 fn evidence_level_word(level: i32) -> &'static str {
-    match mcw::EvidenceLevel::try_from(level).unwrap_or_default() {
-        mcw::EvidenceLevel::L0Definitional => "L0 definitional",
-        mcw::EvidenceLevel::L1Observational => "L1 observational",
-        mcw::EvidenceLevel::L2Empirical => "L2 empirical",
-        mcw::EvidenceLevel::L3Validated => "L3 validated",
-        mcw::EvidenceLevel::Unspecified => "unleveled",
+    match mcw::SupportLevel::try_from(level).unwrap_or_default() {
+        mcw::SupportLevel::Definitional => "definitional",
+        mcw::SupportLevel::Observational => "observational",
+        mcw::SupportLevel::Empirical => "empirical",
+        mcw::SupportLevel::Validated => "validated",
+        mcw::SupportLevel::Unspecified => "unleveled",
     }
 }
 

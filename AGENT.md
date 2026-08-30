@@ -148,7 +148,8 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
 cargo test --workspace                       # 40+ tests, all offline
 cargo run -- run graffy.builtin.conversation --prompt "hi" --offline --tui
 cargo run -- run <graph> --prompt "..." --retry auto   # C2 repair-feedback retries
-cargo run -- rate <session-id>               # human HRDM sampling (0-3 anchors)
+cargo run -- rate <session-id> [--blinded]   # boundary-transcript HRDM rating (calibration)
+cargo run -- run <graph> --prompt "..." --session <id>  # continue a session (adds an exchange)
 cargo run -- graphify SKILL.md --mode collaborative
 cargo run -- mcp add fixture --stdio "python3 crates/graffy-mcp/tests/fixture/mini_server.py"
 cargo run -- replay graffy-runs/<id>.journal --tui

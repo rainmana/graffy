@@ -61,6 +61,11 @@ enum Command {
         /// Rater identity stamped on every sample (default: $USER).
         #[arg(long)]
         rater: Option<String>,
+        /// Condition-blinded rating: suppress graph names and any
+        /// arm-revealing header fields (the projection itself carries no
+        /// provider/model/tier/judge-label fields by construction).
+        #[arg(long)]
+        blinded: bool,
     },
     Run {
         /// Path to a TOML graph spec (see graphs/), or a registered graph id.
@@ -83,6 +88,11 @@ enum Command {
         /// context: a number of extra attempts, or 'auto' (bounded — 3).
         #[arg(long)]
         retry: Option<String>,
+        /// Continue an existing coordination session: boundary exchanges
+        /// accumulate across prompts, and five completed exchanges make a
+        /// canonical H/D/M window (docs/mcw/hrdm-in-graffy.md §1.3).
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Replay a run journal: fold the event stream into a summary.
     Replay {
@@ -201,7 +211,8 @@ async fn main() -> anyhow::Result<()> {
             session,
             dir,
             rater,
-        } => cmd_rate(session, dir, rater),
+            blinded,
+        } => cmd_rate(session, dir, rater, blinded),
         Command::Run {
             spec,
             prompt,
@@ -209,7 +220,8 @@ async fn main() -> anyhow::Result<()> {
             offline,
             journal,
             retry,
-        } => run_graph(spec, prompt, tui, offline, journal, retry).await,
+            session,
+        } => run_graph(spec, prompt, tui, offline, journal, retry, session).await,
         Command::Replay {
             journal,
             tui,
@@ -436,10 +448,13 @@ fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
             .unwrap_or_else(|| "n/a".to_owned())
     );
     println!(
-        "  repair fx    : {} of {} repairs succeeded ({})",
-        aggregate.repairs_successful,
+        "  repair fx    : run-passed {} of {} ({}) · target resolved {} of {} assessed ({})",
+        aggregate.repairs_run_passed,
         aggregate.repairs,
-        rate_str(aggregate.repair_success_rate)
+        rate_str(aggregate.repair_run_passed_rate),
+        aggregate.repairs_target_resolved,
+        aggregate.repairs_resolution_assessed,
+        rate_str(aggregate.repair_target_resolution_rate)
     );
     let _ = &sessions;
     println!(
@@ -521,6 +536,7 @@ async fn run_graph(
     offline: bool,
     journal: Option<PathBuf>,
     retry: Option<String>,
+    session: Option<String>,
 ) -> anyhow::Result<()> {
     let spec_text = resolve_spec(&spec_arg).await?;
     let spec = GraphSpec::from_toml_str(&spec_text)?;
@@ -564,7 +580,7 @@ async fn run_graph(
         return Ok(());
     }
 
-    let mut session_id: Option<String> = None;
+    let mut session_id: Option<String> = session;
     let mut feedback: Vec<graffy_core::exec::RepairFeedback> = Vec::new();
     for attempt in 1..=max_attempts {
         let journal_path = match (&journal, attempt) {
@@ -602,7 +618,14 @@ async fn run_graph(
 
         if succeeded {
             if attempt > 1 {
-                println!("\nconverged on attempt {attempt}/{max_attempts} — repair episode closed");
+                println!(
+                    "\nconverged on attempt {attempt}/{max_attempts} — internal repair sequence closed"
+                );
+            }
+            if let Some(ses) = &session_id {
+                println!(
+                    "continue this session (adds a boundary exchange): graffy run {spec_arg} --prompt \"...\" --session {ses}"
+                );
             }
             return Ok(());
         }
@@ -699,10 +722,37 @@ async fn report_outcome(spec: &GraphSpec, spec_text: &str, outcome: RunOutcome) 
     }
 }
 
-/// Rubric version stamped on every sample this build produces. The
-/// `-draft` suffix drops only when the framework author ratifies
-/// docs/mcw/hrdm-in-graffy.md — scores across versions are not comparable.
-const HRDM_RUBRIC_VERSION: &str = "mcw-hrdm@v0.2 + graffy-adaptation@v1-draft";
+/// Canonical rubric pin (immutable: framework commit + rubric content hash)
+/// plus the adaptation identifier, per §6 of the conformance review. The
+/// `-draft` suffix drops only after the section-8 gates pass AND the
+/// framework author explicitly ratifies that exact version.
+const HRDM_RUBRIC_VERSION: &str = "mcw-hrdm@8365d220+sha256.87ed2be6 + graffy-journal-map@v1-draft";
+const HRDM_ADAPTATION_VERSION: &str = "graffy-journal-map@v1-draft";
+const HRDM_SEGMENTATION_VERSION: &str = "boundary-projection@v1";
+
+// Canonical anchors, quoted from the pinned mcw-framework
+// docs/experiments/hrdm_rubrics.md (displayed in full during rating — the
+// framework page remains the source of truth).
+const H_ANCHORS: &str = "H — MCW Health (0-3), per five-exchange window:\n\
+  H3 strong   — no misalignment surfaces; references to earlier content used correctly; at most one trivial clarification, resolved within a single exchange.\n\
+  H2 adequate — minor misalignment surfaces but is repaired within the window in <= 2 dedicated repair turns; no completed work discarded or redone.\n\
+  H1 strained — at least one misalignment forces rework or discarding of a work product, OR the same IU requires >= 2 clarification attempts without convergence.\n\
+  H0 broken   — the parties demonstrably pursue different goals or referents; a work product is rejected wholesale; or the interaction is abandoned or reset.";
+const R_ANCHORS: &str = "R — Repair Cost (0-3), per EXTERNAL repair episode:\n\
+  R0 low  — realignment within <= 1 dedicated repair turn; no work discarded.\n\
+  R1      — realignment within 2 dedicated repair turns, or minor rework.\n\
+  R2      — 3-5 dedicated repair turns, or a work product substantially redone.\n\
+  R3 high — > 5 dedicated repair turns, a full restart/reset, or repair abandoned with the misalignment left standing.";
+const D_ANCHORS: &str = "D — Drift Rate (0-3), per window, via LATE DISCOVERIES (misalignments surfacing >= 3 completed exchanges after the turn that introduced them; both ends need citations):\n\
+  D0 stable — no late discoveries; misalignment surfaces within 2 exchanges of introduction.\n\
+  D1        — exactly one late discovery in the window.\n\
+  D2        — two late discoveries, or one whose introducing turn lies more than 10 exchanges back.\n\
+  D3 rapid  — three or more late discoveries, or end-of-window goal statements materially disagree.";
+const M_ANCHORS: &str = "M — Misattribution (0-3), per window, Human-AI only. A COMPLETE transcript with NO capability-blame statements is M0. Reserve unratable for an INCOMPLETE record or unverifiable capability-vs-context evidence — absence of blame is not a reason to mark unratable, and never infer untyped human thoughts:\n\
+  M0 none     — no capability-blame statements; failures attributed to information not exchanged.\n\
+  M1          — capability blame expressed once but withdrawn or corrected during repair.\n\
+  M2          — blame recurs (>= 2 statements) without verification, or capability-flavored corrective action while the needed IU was never externalized.\n\
+  M3 frequent — the interaction strategy reorganizes around presumed incapability while the transcript shows the needed IU was never sent.";
 
 enum ScoreAnswer {
     Score(i32),
@@ -710,8 +760,9 @@ enum ScoreAnswer {
     Abort,
 }
 
-/// Read one anchored score from stdin: 0–3, 'u' (unratable — recorded as
-/// absent, never guessed), or 'q'/EOF (abort — silence never registers).
+/// Read one anchored score from stdin: 0-3, 'u' (unratable — recorded as
+/// absent WITH a required reason), or 'q'/EOF (abort — silence never
+/// registers anything).
 fn ask_score(lines: &mut dyn Iterator<Item = std::io::Result<String>>, label: &str) -> ScoreAnswer {
     loop {
         println!("{label} [0-3 / u / q]:");
@@ -733,18 +784,36 @@ fn ask_score(lines: &mut dyn Iterator<Item = std::io::Result<String>>, label: &s
     }
 }
 
+/// Read one free-text line (empty allowed); None = abort.
+fn ask_line(
+    lines: &mut dyn Iterator<Item = std::io::Result<String>>,
+    label: &str,
+) -> Option<String> {
+    println!("{label}");
+    match lines.next() {
+        None | Some(Err(_)) => None,
+        Some(Ok(line)) => Some(line.trim().to_owned()),
+    }
+}
+
 fn rating_aborted() -> anyhow::Result<()> {
     println!("\naborted — nothing was recorded (silence never registers).");
     Ok(())
 }
 
-/// `graffy rate <session>` — human H/R/D/M sampling per
-/// docs/mcw/hrdm-in-graffy.md. graffy does the mechanical work (finding the
-/// session's runs, proposing windows and repair episodes); the anchored
-/// judgments are the human's. Samples land in a rating journal that
-/// `graffy metrics` reads like any other.
-fn cmd_rate(session: String, dir: Option<PathBuf>, rater: Option<String>) -> anyhow::Result<()> {
-    use graffy_core::metrics::{RunMetrics, propose_episodes, propose_windows};
+/// `graffy rate <session>` — human H/R/D/M sampling over the EXTERNAL
+/// boundary transcript (docs/mcw/hrdm-in-graffy.md). graffy reconstructs the
+/// conversation the human and AI actually had, proposes canonical units, and
+/// separates internal orchestration into telemetry that is never rated. The
+/// anchored judgments are the human's; every score carries citations,
+/// provenance, immutable pins, and calibration status.
+fn cmd_rate(
+    session: String,
+    dir: Option<PathBuf>,
+    rater: Option<String>,
+    blinded: bool,
+) -> anyhow::Result<()> {
+    use graffy_core::boundary::{self, BoundaryActor};
     use std::io::BufRead;
 
     let dir = dir.unwrap_or_else(runs_dir);
@@ -757,126 +826,250 @@ fn cmd_rate(session: String, dir: Option<PathBuf>, rater: Option<String>) -> any
         })
         .unwrap_or_default();
     paths.sort();
-    let mut rows: Vec<RunMetrics> = Vec::new();
+    let mut runs_events: Vec<Vec<graffy_core::journal::wire::RunEvent>> = Vec::new();
     for p in &paths {
         if let Ok(events) = JournalReader::read_all(p) {
-            let m = RunMetrics::fold(&events);
-            if m.session_id == session && m.graph_id != "graffy.mcw.rating" {
-                rows.push(m);
+            let manifest = events.iter().find_map(|e| match &e.event {
+                Some(graffy_core::journal::wire::run_event::Event::RunStarted(m)) => {
+                    Some((m.session_id.clone(), m.graph_id.clone()))
+                }
+                _ => None,
+            });
+            if let Some((ses, graph_id)) = manifest
+                && ses == session
+                && graph_id != "graffy.mcw.rating"
+            {
+                runs_events.push(events);
             }
         }
     }
-    if rows.is_empty() {
+    if runs_events.is_empty() {
         anyhow::bail!(
-            "no runs found for session '{session}' in {} — `graffy runs` lists sessions",
+            "no runs found for session '{session}' in {} — every run prints its session id",
             dir.display()
         );
     }
 
+    let projection = boundary::project(&runs_events);
+    let blinding_profile = if blinded {
+        format!("{}+redacted-cli", boundary::BLINDING_PROFILE)
+    } else {
+        boundary::BLINDING_PROFILE.to_owned()
+    };
+
     println!(
-        "rating session {session} — {} run(s) · scale 0-3 · 'u' unratable · 'q' abort",
-        rows.len()
+        "rating session {session} — boundary projection ({}), adaptation {}",
+        blinding_profile, HRDM_ADAPTATION_VERSION
     );
-    println!("anchors: docs/mcw/hrdm-in-graffy.md (graffy) + hrdm_rubrics.md (framework)\n");
-    for (i, r) in rows.iter().enumerate() {
-        println!(
-            "  run {} — {}  {:<9} failures {:?}  repairs {}",
-            i + 1,
-            r.run_id,
-            r.status,
-            r.failures_by_mode,
-            r.repairs
-        );
+    println!("STATUS: calibration-only — this adaptation is DRAFT (not ratified).\n");
+    println!(
+        "internal orchestration telemetry (NOT canonical H/R/D/M): {} runs · {} retry-carrying · {} failure signals · {} repair actions · {} without a verified response",
+        projection.internal.runs,
+        projection.internal.retry_runs,
+        projection.internal.failure_signals,
+        projection.internal.repair_actions,
+        projection.internal.runs_without_verified_response
+    );
+    println!("\nboundary transcript ({} turns):", projection.turns.len());
+    for (i, t) in projection.turns.iter().enumerate() {
+        let actor = match t.actor {
+            BoundaryActor::Human => "HUMAN",
+            BoundaryActor::Ai => "AI   ",
+        };
+        println!("  [{}] {} {:?} ({})", i, actor, t.role, t.refs.join(" "));
+        for line in t.content.lines() {
+            println!("      {line}");
+        }
     }
+    println!(
+        "\nproposed segmentation: {} completed exchanges · {} complete window(s) · {} trailing exchange(s) NOT scored · {} candidate external repair episode(s)",
+        projection.exchanges.len(),
+        projection.complete_windows.len(),
+        projection.trailing_exchanges,
+        projection.repair_episodes.len()
+    );
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
+    let Some(seg_answer) = ask_line(
+        &mut lines,
+        "accept the proposed segmentation? [enter = yes / type a correction note — corrections are kept as audit trail, the mechanical proposal is preserved]:",
+    ) else {
+        return rating_aborted();
+    };
+    let seg_note = if seg_answer.is_empty() {
+        "segmentation: accepted as proposed".to_owned()
+    } else {
+        format!("segmentation correction (audit): {seg_answer}")
+    };
+
     let rater_id = rater
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "human".to_owned());
     let mut samples: Vec<graffy_proto::mcw::v1::HrdmSample> = Vec::new();
-    let base_sample = |scope: String, run_id: String| graffy_proto::mcw::v1::HrdmSample {
+    let base_sample = |unit_id: String, refs: Vec<String>| graffy_proto::mcw::v1::HrdmSample {
         sampled_at: Some(graffy_core::exec::now_ts()),
         session_id: session.clone(),
-        run_id,
-        scope,
+        run_id: String::new(),
+        scope: unit_id.clone(),
         health: None,
         repair_cost: None,
         drift: None,
         misattribution: None,
-        source: graffy_proto::mcw::v1::ScoreSource::HumanSurvey as i32,
+        source: graffy_proto::mcw::v1::ScoreSource::HumanRater as i32,
         rubric_version: HRDM_RUBRIC_VERSION.to_owned(),
         rater_id: rater_id.clone(),
-        note: String::new(),
+        note: seg_note.clone(),
+        unit_id,
+        evidence_refs: refs,
+        adaptation_version: HRDM_ADAPTATION_VERSION.to_owned(),
+        blinding_profile: blinding_profile.clone(),
+        segmentation_version: HRDM_SEGMENTATION_VERSION.to_owned(),
+        calibration_status: "calibration".to_owned(),
+        unratable_reasons: String::new(),
     };
 
-    for (wi, (start, end)) in propose_windows(rows.len()).into_iter().enumerate() {
+    if projection.complete_windows.is_empty() {
         println!(
-            "\nwindow {} (runs {}-{}) — H, D, M are scored per window:",
-            wi + 1,
-            start + 1,
-            end + 1
+            "\nno complete five-exchange windows: this session is NOT eligible for canonical H/D/M \
+             (a retry session is one attempted exchange, not five — see adaptation §1.3). \
+             Build exchanges with:  graffy run <graph> --prompt \"...\" --session {session}"
         );
-        let h = match ask_score(
-            &mut lines,
-            "  H — shared understanding (3 strong … 0 broken)",
-        ) {
+    }
+
+    for (wi, (ws, we)) in projection.complete_windows.iter().enumerate() {
+        println!(
+            "\n===== window {} (exchanges {}-{}) =====",
+            wi + 1,
+            ws + 1,
+            we + 1
+        );
+        let mut refs: Vec<String> = Vec::new();
+        for ex in &projection.exchanges[*ws..=*we] {
+            for idx in [ex.human_turn, ex.ai_turn] {
+                let t = &projection.turns[idx];
+                refs.extend(t.refs.iter().cloned());
+                println!(
+                    "  [{idx}] {} {:?}: {}",
+                    if t.actor == BoundaryActor::Human {
+                        "HUMAN"
+                    } else {
+                        "AI"
+                    },
+                    t.role,
+                    t.content.lines().next().unwrap_or("")
+                );
+            }
+        }
+        let mut reasons: Vec<String> = Vec::new();
+        println!("\n{H_ANCHORS}");
+        let h = match ask_score(&mut lines, "score H") {
             ScoreAnswer::Abort => return rating_aborted(),
-            ScoreAnswer::Unratable => None,
+            ScoreAnswer::Unratable => {
+                let Some(r) = ask_line(&mut lines, "  unratable reason for H (required):") else {
+                    return rating_aborted();
+                };
+                reasons.push(format!("H: {r}"));
+                None
+            }
             ScoreAnswer::Score(v) => Some(v),
         };
-        let d = match ask_score(
-            &mut lines,
-            "  D — drift via late discoveries (0 stable … 3 rapid)",
-        ) {
+        println!("\n{D_ANCHORS}");
+        let d = match ask_score(&mut lines, "score D") {
             ScoreAnswer::Abort => return rating_aborted(),
-            ScoreAnswer::Unratable => None,
+            ScoreAnswer::Unratable => {
+                let Some(r) = ask_line(&mut lines, "  unratable reason for D (required):") else {
+                    return rating_aborted();
+                };
+                reasons.push(format!("D: {r}"));
+                None
+            }
             ScoreAnswer::Score(v) => Some(v),
         };
-        println!("  (M needs capability-blame evidence in YOUR OWN prompts — 'u' if none)");
-        let m = match ask_score(&mut lines, "  M — capability-blame (0 none … 3 frequent)") {
+        println!("\n{M_ANCHORS}");
+        let m = match ask_score(&mut lines, "score M") {
             ScoreAnswer::Abort => return rating_aborted(),
-            ScoreAnswer::Unratable => None,
+            ScoreAnswer::Unratable => {
+                let Some(r) = ask_line(
+                    &mut lines,
+                    "  unratable reason for M (required — incomplete record / unverifiable evidence; absence of blame is M0, not unratable):",
+                ) else {
+                    return rating_aborted();
+                };
+                reasons.push(format!("M: {r}"));
+                None
+            }
             ScoreAnswer::Score(v) => Some(v),
         };
-        let mut s = base_sample(format!("window:{}", wi + 1), String::new());
+        let mut s = base_sample(format!("window:{}", wi + 1), refs);
         s.health = h;
         s.drift = d;
         s.misattribution = m;
+        s.unratable_reasons = reasons.join("; ");
         samples.push(s);
     }
 
-    let episodes = propose_episodes(&rows);
-    if episodes.is_empty() {
-        println!("\nno repair episodes proposed (no retry-carrying runs) — R not scored.");
-    }
-    for (ei, (start, end)) in episodes.into_iter().enumerate() {
+    let mut confirmed_episodes = 0usize;
+    for (ei, ep) in projection.repair_episodes.iter().enumerate() {
+        let t = &projection.turns[ep.initiating_turn];
         println!(
-            "\nrepair episode {} (runs {}-{}) — R is scored per episode:",
+            "\n===== candidate external repair episode {} — initiated at turn [{}] ({}) =====",
             ei + 1,
-            start + 1,
-            end + 1
+            ep.initiating_turn,
+            t.refs.join(" ")
         );
-        let r = match ask_score(&mut lines, "  R — repair cost (0 low … 3 high)") {
+        for line in t.content.lines() {
+            println!("      {line}");
+        }
+        match ep.closed_at_exchange {
+            Some(x) => println!("  proposed closure: exchange {}", x + 1),
+            None => println!("  proposed closure: NOT closed in this session"),
+        }
+        let Some(confirm) = ask_line(
+            &mut lines,
+            "confirm this as an external repair episode? [enter = yes / n = exclude]:",
+        ) else {
+            return rating_aborted();
+        };
+        if confirm.eq_ignore_ascii_case("n") {
+            println!("  excluded (kept in audit trail as unconfirmed proposal).");
+            continue;
+        }
+        confirmed_episodes += 1;
+        println!("\n{R_ANCHORS}");
+        let r = match ask_score(&mut lines, "score R") {
             ScoreAnswer::Abort => return rating_aborted(),
-            ScoreAnswer::Unratable => None,
+            ScoreAnswer::Unratable => {
+                let Some(reason) = ask_line(&mut lines, "  unratable reason for R (required):")
+                else {
+                    return rating_aborted();
+                };
+                let mut s = base_sample(
+                    format!("repair_episode:turn-{}", ep.initiating_turn),
+                    t.refs.clone(),
+                );
+                s.unratable_reasons = format!("R: {reason}");
+                samples.push(s);
+                continue;
+            }
             ScoreAnswer::Score(v) => Some(v),
         };
         let mut s = base_sample(
-            format!("repair_episode:{}", rows[start].run_id),
-            rows[end].run_id.clone(),
+            format!("repair_episode:turn-{}", ep.initiating_turn),
+            t.refs.clone(),
         );
         s.repair_cost = r;
         samples.push(s);
     }
 
-    if samples.iter().all(|s| {
-        s.health.is_none()
-            && s.repair_cost.is_none()
-            && s.drift.is_none()
-            && s.misattribution.is_none()
-    }) {
-        println!("\nevery unit was unratable — recording nothing rather than noise.");
+    // Canonical R_ev: confirmed EXTERNAL episodes per 10 completed exchanges.
+    let r_ev = boundary::r_ev(confirmed_episodes, projection.exchanges.len());
+    if let Some(rate) = r_ev {
+        println!("\nR_ev (confirmed external episodes per 10 exchanges): {rate:.2}");
+    }
+
+    if samples.is_empty() {
+        println!("\nnothing was scored — nothing recorded.");
         return Ok(());
     }
 
@@ -903,12 +1096,18 @@ fn cmd_rate(session: String, dir: Option<PathBuf>, rater: Option<String>) -> any
     writer.append(JEvent::RunFinished(wire::RunFinished {
         status: wire::RunStatus::Succeeded as i32,
         summary: format!(
-            "hrdm rating: {count} sample(s) by {rater_id} against {HRDM_RUBRIC_VERSION}"
+            "hrdm CALIBRATION rating: {count} sample(s) by {rater_id} · {} · R_ev {} · {seg_note}",
+            HRDM_RUBRIC_VERSION,
+            r_ev.map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "n/a".to_owned()),
         ),
         ..Default::default()
     }))?;
-    println!("\nrecorded {count} sample(s) → {}", out_path.display());
-    println!("they appear in `graffy metrics` immediately (hrdm samples).");
+    println!(
+        "\nrecorded {count} calibration sample(s) → {}",
+        out_path.display()
+    );
+    println!("(draft adaptation: these are calibration data, never headline data.)");
     Ok(())
 }
 

@@ -142,6 +142,28 @@ pub fn repair_op_for_mode(mode: mcw::FailureMode) -> mcw::RepairOperation {
     }
 }
 
+/// Parse an operational support floor. Legacy "L0".."L3" spellings map onto
+/// the renamed ladder; unknown strings return None (nothing is guessed —
+/// spec validation will reject unknown floors at the door in a later pass).
+pub fn support_floor(min_level: &str) -> Option<mcw::SupportLevel> {
+    match min_level.trim().to_ascii_lowercase().as_str() {
+        "l0" | "definitional" => Some(mcw::SupportLevel::Definitional),
+        "l1" | "observational" => Some(mcw::SupportLevel::Observational),
+        "l2" | "empirical" => Some(mcw::SupportLevel::Empirical),
+        "l3" | "validated" => Some(mcw::SupportLevel::Validated),
+        _ => None,
+    }
+}
+
+/// Lowercase display name for an operational support level.
+pub fn support_level_name(level: i32) -> String {
+    mcw::SupportLevel::try_from(level)
+        .unwrap_or(mcw::SupportLevel::Unspecified)
+        .as_str_name()
+        .trim_start_matches("SUPPORT_LEVEL_")
+        .to_ascii_lowercase()
+}
+
 // ---------------------------------------------------------------------------
 // Guard expressions
 // ---------------------------------------------------------------------------
@@ -425,9 +447,9 @@ impl NodeBehavior for ToolInvokeNode {
         let mut out = NodeOutput::default();
         let evidence_id = EvidenceId::generate().to_string();
         let level = match ctx.param_str("evidence_level").as_deref() {
-            Some("L2") => mcw::EvidenceLevel::L2Empirical,
-            Some("L0") => mcw::EvidenceLevel::L0Definitional,
-            _ => mcw::EvidenceLevel::L1Observational,
+            Some("L2") => mcw::SupportLevel::Empirical,
+            Some("L0") => mcw::SupportLevel::Definitional,
+            _ => mcw::SupportLevel::Observational,
         };
         out.evidence.push(mcw::EvidenceArtifact {
             id: evidence_id.clone(),
@@ -463,10 +485,12 @@ impl NodeBehavior for ToolInvokeNode {
             source: Some(node_actor(&ctx.node.id)),
             session_id: ctx.session_id.to_owned(),
             run_id: ctx.run_id.to_owned(),
-            stages: five_stage_records(node_actor(&ctx.node.id), node_actor(&ctx.node.id), "text"),
-            salience: 0.8,
+            stages: Vec::new(),
+            salience: Some(0.8),
+            salience_source: "assigned:node-role-prior (policy weight, not a measurement)"
+                .to_owned(),
             evidence_ids: vec![evidence_id],
-            evidence_level: level as i32,
+            support_ceiling: level as i32,
             attributes,
             ..Default::default()
         });
@@ -526,6 +550,9 @@ pub struct NodeCtx<'a> {
     pub effective_tier: String,
     pub escalation_level: u32,
     pub policy: &'a PolicySpec,
+    /// Support level of every artifact recorded so far this run, by id —
+    /// the deterministic input to the verify node's structural floor.
+    pub artifact_support: &'a HashMap<String, i32>,
     pub invoker: &'a dyn ModelInvoker,
     /// Evidence policy: whether artifacts surface in the UI (strict) or stay
     /// journal-only (trace-only).
@@ -643,28 +670,13 @@ impl NodeRegistry {
     }
 }
 
-fn five_stage_records(
-    origin: mcw::ActorRef,
-    integrator: mcw::ActorRef,
-    representation: &str,
-) -> Vec<mcw::IuStageRecord> {
-    use mcw::IuStage;
-    let mk = |stage: IuStage, actor: &mcw::ActorRef| mcw::IuStageRecord {
-        stage: stage as i32,
-        occurred_at: Some(now_ts()),
-        actor: Some(actor.clone()),
-        representation: representation.to_owned(),
-        fidelity_estimate: 1.0,
-        note: String::new(),
-    };
-    vec![
-        mk(IuStage::Selection, &origin),
-        mk(IuStage::Encoding, &origin),
-        mk(IuStage::Transmission, &origin),
-        mk(IuStage::Decoding, &integrator),
-        mk(IuStage::Integration, &integrator),
-    ]
-}
+// NOTE (Blocker D, 2026-08-30 conformance review): graffy previously
+// fabricated all five IU transfer-stage records — including latent human
+// stages it cannot observe — with fidelity_estimate = 1.0, i.e. perfect
+// meaning survival it never measured. Stage records are now recorded ONLY
+// when a node actually observes or explicitly infers a stage, with fidelity
+// absent unless measured (IuStageRecord.fidelity_method names the
+// instrument). No built-in node currently claims to observe any stage.
 
 /// `intake` — decomposes the user turn into Information Units and records the
 /// verbatim prompt as human-input evidence (L1).
@@ -684,7 +696,7 @@ impl NodeBehavior for IntakeNode {
             producer: Some(human_actor()),
             run_id: ctx.run_id.to_owned(),
             summary: "verbatim user prompt".to_owned(),
-            level: mcw::EvidenceLevel::L1Observational as i32,
+            level: mcw::SupportLevel::Observational as i32,
             user_visible: ctx.evidence_visible,
         });
         out.ius.push(mcw::InformationUnit {
@@ -695,10 +707,12 @@ impl NodeBehavior for IntakeNode {
             source: Some(human_actor()),
             session_id: ctx.session_id.to_owned(),
             run_id: ctx.run_id.to_owned(),
-            stages: five_stage_records(human_actor(), node_actor(&ctx.node.id), "text"),
-            salience: 1.0,
+            stages: Vec::new(),
+            salience: Some(1.0),
+            salience_source: "assigned:node-role-prior (policy weight, not a measurement)"
+                .to_owned(),
             evidence_ids: vec![evidence_id],
-            evidence_level: mcw::EvidenceLevel::L1Observational as i32,
+            support_ceiling: mcw::SupportLevel::Observational as i32,
             ..Default::default()
         });
         out.guard_facts
@@ -730,13 +744,27 @@ struct ModelNode;
 #[async_trait::async_trait]
 impl NodeBehavior for ModelNode {
     async fn execute(&self, ctx: &mut NodeCtx<'_>) -> Result<NodeExecutionResult, ExecError> {
-        let goal = ctx
+        // Blocker C: track exactly which ledger IUs this draft consumes so
+        // the derived claim inherits their evidence lineage — a tool receipt
+        // in the journal proves nothing if the claim never cites it.
+        let mut consumed_iu_ids: Vec<String> = Vec::new();
+        let mut inherited_evidence: Vec<String> = Vec::new();
+        let mut consume = |iu: &mcw::InformationUnit| {
+            consumed_iu_ids.push(iu.id.clone());
+            inherited_evidence.extend(iu.evidence_ids.iter().cloned());
+        };
+        let goal = match ctx
             .ledger
             .iter()
             .rev()
             .find(|iu| iu.kind == mcw::IuKind::Goal as i32)
-            .map(|iu| iu.payload_text.clone())
-            .unwrap_or_else(|| ctx.prompt.to_owned());
+        {
+            Some(iu) => {
+                consume(iu);
+                iu.payload_text.clone()
+            }
+            None => ctx.prompt.to_owned(),
+        };
         let feedback: Vec<String> = ctx
             .ledger
             .iter()
@@ -745,7 +773,10 @@ impl NodeBehavior for ModelNode {
                     .get("role")
                     .is_some_and(|r| r == "review-feedback")
             })
-            .map(|iu| iu.payload_text.clone())
+            .map(|iu| {
+                consume(iu);
+                iu.payload_text.clone()
+            })
             .collect();
 
         let system = ctx.param_str("system").unwrap_or_else(|| {
@@ -762,6 +793,7 @@ impl NodeBehavior for ModelNode {
                     .rev()
                     .find(|iu| iu.attributes.get("role").is_some_and(|r| r == role))
                 {
+                    consume(iu);
                     context_sections.push(format!("[{role}]\n{}", iu.payload_text));
                 }
             }
@@ -806,7 +838,7 @@ impl NodeBehavior for ModelNode {
                 "draft completion from {}:{}",
                 response.provider, response.model
             ),
-            level: mcw::EvidenceLevel::L0Definitional as i32,
+            level: mcw::SupportLevel::Definitional as i32,
             user_visible: ctx.evidence_visible,
         });
         let mut attributes = HashMap::new();
@@ -818,6 +850,7 @@ impl NodeBehavior for ModelNode {
             "model".to_owned(),
             format!("{}:{}", response.provider, response.model),
         );
+        attributes.insert("derived_from_ius".to_owned(), consumed_iu_ids.join(","));
         out.ius.push(mcw::InformationUnit {
             id: IuId::generate().to_string(),
             kind: mcw::IuKind::Other as i32,
@@ -826,10 +859,16 @@ impl NodeBehavior for ModelNode {
             source: Some(node_actor(&ctx.node.id)),
             session_id: ctx.session_id.to_owned(),
             run_id: ctx.run_id.to_owned(),
-            stages: five_stage_records(node_actor(&ctx.node.id), node_actor(&ctx.node.id), "text"),
-            salience: 0.8,
-            evidence_ids: vec![evidence_id],
-            evidence_level: mcw::EvidenceLevel::L0Definitional as i32,
+            stages: Vec::new(),
+            salience: Some(0.8),
+            salience_source: "assigned:node-role-prior (policy weight, not a measurement)"
+                .to_owned(),
+            evidence_ids: {
+                let mut ids = vec![evidence_id];
+                ids.extend(inherited_evidence);
+                ids
+            },
+            support_ceiling: mcw::SupportLevel::Definitional as i32,
             attributes,
             ..Default::default()
         });
@@ -860,6 +899,32 @@ impl NodeBehavior for VerifyNode {
             ));
         };
 
+        // Blocker B: the support floor is enforced DETERMINISTICALLY before
+        // any model judgment — a judge cannot override a failed structural
+        // floor by returning PASS.
+        if let Some(floor) = support_floor(&ctx.policy.evidence.min_level) {
+            let strongest = draft
+                .evidence_ids
+                .iter()
+                .filter_map(|id| ctx.artifact_support.get(id).copied())
+                .max()
+                .unwrap_or(mcw::SupportLevel::Unspecified as i32);
+            if strongest < floor as i32 {
+                let reason = format!(
+                    "support floor: draft's strongest linked support is '{}' but policy requires '{}' — rejected structurally, no judge consulted",
+                    support_level_name(strongest),
+                    support_level_name(floor as i32),
+                );
+                let mut out = NodeOutput::default();
+                out.guard_facts
+                    .insert("verdict".to_owned(), "revise".to_owned());
+                return Ok(NodeExecutionResult::Escalate {
+                    reason,
+                    output: out,
+                });
+            }
+        }
+
         let system = "You are a strict peer reviewer inside a graffy graph. Judge the draft \
                       for accuracy, grounding, and completeness. Your reply MUST begin with \
                       exactly one word: PASS or REVISE, followed by a short reason. If you \
@@ -869,7 +934,8 @@ impl NodeBehavior for VerifyNode {
                       constraint_opacity, repair_suppression."
             .to_owned();
         let prompt = format!(
-            "Minimum evidence level in force: {}.\n\nDRAFT UNDER REVIEW:\n{}",
+            "The operational support floor ('{}') was already enforced structurally; \
+             judge content quality only.\n\nDRAFT UNDER REVIEW:\n{}",
             ctx.policy.evidence.min_level, draft.payload_text
         );
         let response = ctx.call_model("verify", system, prompt).await?;
@@ -883,6 +949,21 @@ impl NodeBehavior for VerifyNode {
         let passed = first_word == "PASS";
 
         let mut out = NodeOutput::default();
+        // Blocker F: the judge's raw output is itself evidence — hash it so
+        // signals cite an artifact instead of floating on inference.
+        let judge_artifact_id = EvidenceId::generate().to_string();
+        out.evidence.push(mcw::EvidenceArtifact {
+            id: judge_artifact_id.clone(),
+            kind: mcw::EvidenceKind::ModelInference as i32,
+            uri: format!("graffy://run/{}/node/{}/judge", ctx.run_id, ctx.node.id),
+            content_hash: sha256_hex(response.text.as_bytes()),
+            collected_at: Some(now_ts()),
+            producer: Some(node_actor(&ctx.node.id)),
+            run_id: ctx.run_id.to_owned(),
+            summary: format!("judge output from {}:{}", response.provider, response.model),
+            level: mcw::SupportLevel::Definitional as i32,
+            user_visible: ctx.evidence_visible,
+        });
         let mut attributes = HashMap::new();
         attributes.insert(
             "role".to_owned(),
@@ -900,9 +981,12 @@ impl NodeBehavior for VerifyNode {
             source: Some(node_actor(&ctx.node.id)),
             session_id: ctx.session_id.to_owned(),
             run_id: ctx.run_id.to_owned(),
-            stages: five_stage_records(node_actor(&ctx.node.id), node_actor(&ctx.node.id), "text"),
-            salience: 0.9,
-            evidence_level: mcw::EvidenceLevel::L0Definitional as i32,
+            stages: Vec::new(),
+            salience: Some(0.9),
+            salience_source: "assigned:node-role-prior (policy weight, not a measurement)"
+                .to_owned(),
+            evidence_ids: vec![judge_artifact_id.clone()],
+            support_ceiling: mcw::SupportLevel::Definitional as i32,
             attributes,
             ..Default::default()
         });
@@ -917,16 +1001,25 @@ impl NodeBehavior for VerifyNode {
             let mode = parse_judge_mode(&response.text)
                 .map(|n| failure_mode_from_name(&n))
                 .unwrap_or(mcw::FailureMode::Unspecified);
+            // Blocker F: a judge-named mode is an UNCALIBRATED HYPOTHESIS,
+            // not a detected fact — confidence stays absent and the judge's
+            // own output artifact is the linked evidence.
+            let mut detector = node_actor(&ctx.node.id);
+            detector.display_name = format!(
+                "{} (model-judge hypothesis, uncalibrated)",
+                detector.display_name
+            );
             ctx.records.push(Event::FailureRaised(mcw::FailureSignal {
                 id: crate::id::EvidenceId::generate().to_string(),
                 mode: mode as i32,
                 detected_at: Some(now_ts()),
-                detector: Some(node_actor(&ctx.node.id)),
+                detector: Some(detector),
                 session_id: ctx.session_id.to_owned(),
                 run_id: ctx.run_id.to_owned(),
-                confidence: 0.6,
+                confidence: None,
                 early_signal: response.text.clone(),
                 implicated_iu_ids: vec![draft.id.clone()],
+                evidence_ids: vec![judge_artifact_id.clone()],
                 ..Default::default()
             }));
             out.guard_facts
@@ -968,10 +1061,12 @@ impl NodeBehavior for RespondNode {
             source: Some(node_actor(&ctx.node.id)),
             session_id: ctx.session_id.to_owned(),
             run_id: ctx.run_id.to_owned(),
-            stages: five_stage_records(node_actor(&ctx.node.id), human_actor(), "text"),
-            salience: 1.0,
+            stages: Vec::new(),
+            salience: Some(1.0),
+            salience_source: "assigned:node-role-prior (policy weight, not a measurement)"
+                .to_owned(),
             evidence_ids: draft.evidence_ids.clone(),
-            evidence_level: draft.evidence_level,
+            support_ceiling: draft.support_ceiling,
             attributes,
             ..Default::default()
         });
@@ -1131,7 +1226,9 @@ impl Executor {
                 }),
                 session_id: session_id.clone(),
                 run_id: run_id.clone(),
-                salience: 0.9,
+                salience: Some(0.9),
+                salience_source: "assigned:node-role-prior (policy weight, not a measurement)"
+                    .to_owned(),
                 attributes: HashMap::from([
                     ("role".to_owned(), "review-feedback".to_owned()),
                     ("mcw_mode".to_owned(), mode_label),
@@ -1157,6 +1254,8 @@ impl Executor {
         let mut total_usd = 0f64;
         let mut failure_signals = 0u32;
         let mut repairs = 0u32;
+        let mut artifact_levels: HashMap<String, i32> = HashMap::new();
+        let mut modes_raised: HashSet<i32> = HashSet::new();
         let mut final_text: Option<String> = None;
         let mut notes: Vec<String> = Vec::new();
         let mut forced_status: Option<wire::RunStatus> = None;
@@ -1192,7 +1291,7 @@ impl Executor {
                     }),
                     session_id: session_id.clone(),
                     run_id: run_id.clone(),
-                    confidence: 1.0,
+                    confidence: Some(1.0), // deterministic: the cap DID trip
                     early_signal: format!(
                         "convergence exhaustion: node '{}' hit its visit cap ({}) without \
                          a passing verdict — repeated repair attempts did not restore \
@@ -1251,6 +1350,7 @@ impl Executor {
                 effective_tier,
                 escalation_level,
                 policy: &spec.policy,
+                artifact_support: &artifact_levels,
                 invoker,
                 evidence_visible,
                 tool_invoker: self.tool_invoker.as_deref(),
@@ -1266,8 +1366,12 @@ impl Executor {
                     output_tokens += call.output_tokens;
                     total_usd += call.cost_usd;
                 }
-                if matches!(event, Event::FailureRaised(_)) {
+                if let Event::FailureRaised(f) = &event {
                     failure_signals += 1;
+                    modes_raised.insert(f.mode);
+                }
+                if let Event::EvidenceRecorded(a) = &event {
+                    artifact_levels.insert(a.id.clone(), a.level);
                 }
                 if matches!(event, Event::RepairExecuted(_)) {
                     repairs += 1;
@@ -1361,6 +1465,7 @@ impl Executor {
             };
 
             for artifact in &output.evidence {
+                artifact_levels.insert(artifact.id.clone(), artifact.level);
                 journal.append(Event::EvidenceRecorded(artifact.clone()))?;
             }
             for iu in &output.ius {
@@ -1455,6 +1560,19 @@ impl Executor {
                     item.source_attempt
                 ),
                 successful: status == wire::RunStatus::Succeeded,
+                target_failure_resolved: {
+                    // v1 proxy (Blocker G): same-MODE recurrence within the
+                    // repairing run. IU-continuity replaces this once
+                    // declared segmentation (Blocker J) lands.
+                    let recurred = modes_raised.contains(&(item.mode as i32));
+                    if recurred {
+                        Some(false)
+                    } else if status == wire::RunStatus::Succeeded {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                },
             }))?;
             repairs += 1;
         }
@@ -1722,7 +1840,7 @@ mod tests {
                 &e.event,
                 Some(Event::EvidenceRecorded(a))
                     if a.kind == mcw::EvidenceKind::McpResult as i32
-                        && a.level == mcw::EvidenceLevel::L2Empirical as i32
+                        && a.level == mcw::SupportLevel::Empirical as i32
             )
         });
         assert!(mcp_evidence, "MCP result must land as L2 evidence");
@@ -1801,6 +1919,8 @@ mod tests {
                 Some(Event::FailureRaised(f))
                     if f.mode == mcw::FailureMode::FalseAlignment as i32
                         && !f.implicated_iu_ids.is_empty()
+                        && f.confidence.is_none()
+                        && !f.evidence_ids.is_empty()
             )
         });
         assert!(judge_named, "verify must journal the judge-named MCW mode");
@@ -1836,6 +1956,163 @@ mod tests {
             Some("drift")
         );
         assert_eq!(parse_judge_mode("PASS — fine"), None);
+    }
+
+    #[test]
+    fn support_floor_parses_legacy_and_new_names_and_never_guesses() {
+        assert_eq!(support_floor("L1"), Some(mcw::SupportLevel::Observational));
+        assert_eq!(
+            support_floor("observational"),
+            Some(mcw::SupportLevel::Observational)
+        );
+        assert_eq!(support_floor("l3"), Some(mcw::SupportLevel::Validated));
+        assert_eq!(
+            support_floor("vibes"),
+            None,
+            "unknown floors enforce nothing, loudly typed"
+        );
+    }
+
+    /// Blocker B: a draft whose only support is model inference must be
+    /// rejected STRUCTURALLY when the floor requires observation — even when
+    /// the model judge would have said PASS.
+    #[tokio::test]
+    async fn support_floor_rejects_before_any_judge() {
+        let spec_toml = r#"
+[graph]
+id = "graffy.test.floor"
+name = "Floor Test"
+version = "0.0.1"
+
+[policy.evidence]
+mode = "strict"
+min_level = "observational"
+
+[[node]]
+id = "draft"
+kind = "model"
+
+[[node]]
+id = "verify"
+kind = "verify"
+
+[[node]]
+id = "respond"
+kind = "respond"
+
+[[edge]]
+from = "draft"
+to = "verify"
+
+[[edge]]
+from = "verify"
+to = "respond"
+when = "verdict == 'pass'"
+"#;
+        let spec = GraphSpec::from_toml_str(spec_toml).unwrap();
+        let journal_path = temp_path("floor");
+        // No intake node: the draft consumes no human-input IU, so its only
+        // linked support is its own model inference (definitional).
+        let outcome = Executor::default()
+            .run(
+                &spec,
+                spec_toml,
+                RunInput {
+                    prompt: "claim something".to_owned(),
+                    session_id: None,
+                    feedback: Vec::new(),
+                },
+                &journal_path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await
+            .expect("run completes (failed honestly, not crashed)");
+        assert_ne!(
+            outcome.status,
+            wire::RunStatus::Succeeded,
+            "definitional-only draft must not pass an observational floor"
+        );
+        let events = JournalReader::read_all(&journal_path).unwrap();
+        let summary = events
+            .iter()
+            .find_map(|e| match &e.event {
+                Some(Event::RunFinished(f)) => Some(f.summary.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(
+            summary.contains("support floor"),
+            "the run summary must carry the structural floor reason, got: {summary:?}"
+        );
+        // The offline echo judge always passes — so a failed run with the
+        // floor reason proves the structural gate fired BEFORE any judge.
+        std::fs::remove_file(&journal_path).ok();
+    }
+
+    /// Blockers C+D+E: lineage flows into derived claims; no fabricated
+    /// stage records; salience is a sourced policy weight, never bare.
+    #[tokio::test]
+    async fn lineage_flows_and_nothing_is_fabricated() {
+        let spec = GraphSpec::from_toml_str(DEFAULT_CONVERSATION).unwrap();
+        let journal_path = temp_path("lineage");
+        Executor::default()
+            .run(
+                &spec,
+                DEFAULT_CONVERSATION,
+                RunInput {
+                    prompt: "lineage test".to_owned(),
+                    session_id: None,
+                    feedback: Vec::new(),
+                },
+                &journal_path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await
+            .unwrap();
+        let events = JournalReader::read_all(&journal_path).unwrap();
+        let mut human_artifact = None;
+        let mut draft_iu = None;
+        for e in &events {
+            match &e.event {
+                Some(Event::EvidenceRecorded(a))
+                    if a.kind == mcw::EvidenceKind::HumanInput as i32 =>
+                {
+                    human_artifact = Some(a.id.clone());
+                }
+                Some(Event::IuRecorded(iu))
+                    if iu.attributes.get("role").is_some_and(|r| r == "draft") =>
+                {
+                    draft_iu = Some(iu.clone());
+                }
+                _ => {}
+            }
+        }
+        let human_artifact = human_artifact.expect("intake records human-input evidence");
+        let draft_iu = draft_iu.expect("draft IU recorded");
+        assert!(
+            draft_iu.evidence_ids.contains(&human_artifact),
+            "the draft claim must cite the human-input artifact it consumed (Blocker C)"
+        );
+        assert!(
+            draft_iu.attributes.contains_key("derived_from_ius"),
+            "derived-from lineage recorded"
+        );
+        for e in &events {
+            if let Some(Event::IuRecorded(iu)) = &e.event {
+                assert!(
+                    iu.stages.is_empty(),
+                    "no fabricated five-stage records (Blocker D)"
+                );
+                if iu.salience.is_some() {
+                    assert!(
+                        iu.salience_source.starts_with("assigned:"),
+                        "salience carries provenance (Blocker E)"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1989,9 +2266,11 @@ mod tests {
             .next()
             .expect("RepairAction must be journaled");
         assert_eq!(repair.triggered_by_failure_id, signal.id, "back-link");
-        assert!(
-            repair.successful,
-            "attempt 2 passed, so the repair succeeded"
+        assert!(repair.successful, "run passed (deprecated alias)");
+        assert_eq!(
+            repair.target_failure_resolved,
+            Some(true),
+            "drift did not recur in the repaired attempt (v1 proxy)"
         );
         assert_eq!(
             repair.operation,

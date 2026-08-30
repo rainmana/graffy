@@ -2,6 +2,26 @@
 
 ## Unreleased (v0.1.0-alpha.6)
 
+- **MCW conformance repairs** (author review, Blockers A-J —
+  docs/mcw/hrdm-in-graffy.md is now the authoritative conformance doc):
+  boundary-transcript projection separates canonical HCW-ACW turns/exchanges
+  from internal orchestration (retries are internal repair sequences, never
+  canonical episodes); `graffy run --session <id>` continues a session
+  across prompts so real five-exchange windows exist; `graffy rate` rebuilt
+  on the boundary projection (complete windows only, external episodes with
+  per-episode confirmation, M0 vs M-unratable per canon, required unratable
+  reasons, journal:// citations on every score, tested condition-blind
+  projection, immutable rubric/adaptation pins, HUMAN_RATER provenance,
+  calibration-only labeling); the operational claim-support ladder is
+  renamed SupportLevel and formally separated from the canonical
+  McwEvidenceLayer (Article IV); the support floor is enforced
+  deterministically before any judge; draft claims inherit consumed-IU
+  evidence lineage; fabricated five-stage fidelity records removed
+  (fidelity/salience now optional + sourced); judge failure labels are
+  uncalibrated hypotheses linked to their output artifact; repair outcomes
+  distinguish run-passed from target-failure-resolved. Existing draft
+  samples remain draft calibration data — nothing is relabeled.
+
 - **`graffy rate <session>`** — the first HRDM collection path: graffy does
   the mechanical work (finds the session's runs, proposes 5-run windows and
   repair episodes per the adaptation doc), the human makes the anchored

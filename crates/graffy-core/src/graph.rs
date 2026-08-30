@@ -42,6 +42,12 @@ pub struct CompiledGraph {
 impl CompiledGraph {
     /// Compile a TOML spec into an executable topology.
     pub fn compile(spec: &GraphSpec) -> Result<Self, CompileError> {
+        if spec.nodes.is_empty() {
+            return Err(CompileError::Invalid(
+                "a graph with no nodes is not lawful — check section names ([[node]], [[edge]])"
+                    .to_owned(),
+            ));
+        }
         let mut topology = DiGraph::new();
         let mut index_by_id = HashMap::new();
 

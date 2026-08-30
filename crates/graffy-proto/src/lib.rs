@@ -35,7 +35,7 @@ mod tests {
             id: "iu_TEST".to_owned(),
             kind: crate::mcw::v1::IuKind::Constraint as i32,
             payload_text: "answers must cite evidence artifacts".to_owned(),
-            salience: 0.9,
+            salience: Some(0.9),
             ..Default::default()
         };
         let bytes = iu.encode_to_vec();
@@ -52,7 +52,7 @@ mod tests {
                 crate::mcw::v1::FailureSignal {
                     id: "fs_TEST".to_owned(),
                     mode: crate::mcw::v1::FailureMode::Overcompression as i32,
-                    confidence: 0.8,
+                    confidence: Some(0.8),
                     early_signal: "summary dropped the L1 falsification condition".to_owned(),
                     ..Default::default()
                 },

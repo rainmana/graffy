@@ -20,7 +20,7 @@ use graffy_proto::mcw::v1 as mcw;
 use wire::run_event::Event;
 
 /// Strip a protobuf enum prefix and lowercase the remainder:
-/// `FAILURE_MODE_DRIFT` → `drift`, `EVIDENCE_LEVEL_L2` → `l2`.
+/// `FAILURE_MODE_DRIFT` → `drift`, `SUPPORT_LEVEL_L2` → `l2`.
 fn label(raw: &str, prefix: &str) -> String {
     raw.strip_prefix(prefix).unwrap_or(raw).to_ascii_lowercase()
 }
@@ -39,11 +39,11 @@ fn repair_op_label(op: i32) -> String {
     label(name, "REPAIR_OPERATION_")
 }
 
-fn evidence_level_label(level: i32) -> String {
-    let name = mcw::EvidenceLevel::try_from(level)
-        .unwrap_or(mcw::EvidenceLevel::Unspecified)
+fn support_level_label(level: i32) -> String {
+    let name = mcw::SupportLevel::try_from(level)
+        .unwrap_or(mcw::SupportLevel::Unspecified)
         .as_str_name();
-    label(name, "EVIDENCE_LEVEL_")
+    label(name, "SUPPORT_LEVEL_")
 }
 
 fn run_status_label(status: i32) -> String {
@@ -81,9 +81,14 @@ pub struct RunMetrics {
     pub repairs: u64,
     pub repairs_by_op: BTreeMap<String, u64>,
     pub repair_cost_tokens: u64,
-    /// Repairs whose attempt ended in a passing run (honest outcomes only).
-    pub repairs_successful: u64,
-    /// Evidence artifacts recorded, by epistemic level (l0–l3).
+    /// Repairs whose attempt's RUN passed verify (deprecated `successful`).
+    pub repairs_run_passed: u64,
+    /// Repairs whose target failure was assessed for recurrence, and how
+    /// many of those were resolved (mode-recurrence proxy, Blocker G).
+    pub repairs_resolution_assessed: u64,
+    pub repairs_target_resolved: u64,
+    /// Evidence artifacts recorded, by OPERATIONAL support level (not
+    /// the MCW Article IV ladder — see Blocker A).
     pub evidence_artifacts: u64,
     pub evidence_by_level: BTreeMap<String, u64>,
     /// Routing decisions with escalation_level > 0 — each one is a quality
@@ -142,7 +147,13 @@ impl RunMetrics {
                 Event::RepairExecuted(r) => {
                     m.repairs += 1;
                     if r.successful {
-                        m.repairs_successful += 1;
+                        m.repairs_run_passed += 1;
+                    }
+                    if let Some(resolved) = r.target_failure_resolved {
+                        m.repairs_resolution_assessed += 1;
+                        if resolved {
+                            m.repairs_target_resolved += 1;
+                        }
                     }
                     m.repair_cost_tokens += r.cost_tokens;
                     *m.repairs_by_op
@@ -152,7 +163,7 @@ impl RunMetrics {
                 Event::EvidenceRecorded(a) => {
                     m.evidence_artifacts += 1;
                     *m.evidence_by_level
-                        .entry(evidence_level_label(a.level))
+                        .entry(support_level_label(a.level))
                         .or_default() += 1;
                 }
                 Event::RoutingDecision(d) => {
@@ -198,7 +209,7 @@ pub struct SessionMetrics {
     pub attempts_to_pass: Option<u32>,
     pub converged: bool,
     pub repairs: u64,
-    pub repairs_successful: u64,
+    pub repairs_run_passed: u64,
     pub repair_cost_tokens: u64,
     pub failure_signals: u64,
 }
@@ -222,7 +233,7 @@ pub fn sessions_from_rows(rows: &[RunMetrics]) -> Vec<SessionMetrics> {
                 attempts_to_pass: None,
                 converged: false,
                 repairs: 0,
-                repairs_successful: 0,
+                repairs_run_passed: 0,
                 repair_cost_tokens: 0,
                 failure_signals: 0,
             }
@@ -233,7 +244,7 @@ pub fn sessions_from_rows(rows: &[RunMetrics]) -> Vec<SessionMetrics> {
             entry.converged = true;
         }
         entry.repairs += r.repairs;
-        entry.repairs_successful += r.repairs_successful;
+        entry.repairs_run_passed += r.repairs_run_passed;
         entry.repair_cost_tokens += r.repair_cost_tokens;
         entry.failure_signals += r.failure_signals;
     }
@@ -311,9 +322,14 @@ pub struct AggregateMetrics {
     pub sessions_with_retries: u64,
     pub sessions_converged_after_retry: u64,
     pub mean_attempts_to_converge: Option<f64>,
-    /// Successful RepairActions / all RepairActions (`null` when none ran).
-    pub repairs_successful: u64,
-    pub repair_success_rate: Option<f64>,
+    pub repairs_run_passed: u64,
+    /// Run-passed / all repairs (`null` when none ran). NOT causal efficacy.
+    pub repair_run_passed_rate: Option<f64>,
+    pub repairs_resolution_assessed: u64,
+    pub repairs_target_resolved: u64,
+    /// Target-failure resolution rate over ASSESSED repairs only (`null`
+    /// when none were assessed) — the only field that speaks to efficacy.
+    pub repair_target_resolution_rate: Option<f64>,
 }
 
 impl AggregateMetrics {
@@ -335,7 +351,9 @@ impl AggregateMetrics {
             a.ius_recorded += r.ius_recorded;
             a.failure_signals += r.failure_signals;
             a.repairs += r.repairs;
-            a.repairs_successful += r.repairs_successful;
+            a.repairs_run_passed += r.repairs_run_passed;
+            a.repairs_resolution_assessed += r.repairs_resolution_assessed;
+            a.repairs_target_resolved += r.repairs_target_resolved;
             a.repair_cost_tokens += r.repair_cost_tokens;
             a.evidence_artifacts += r.evidence_artifacts;
             a.hrdm_samples += r.hrdm_samples;
@@ -387,8 +405,10 @@ impl AggregateMetrics {
         }
         a.mean_attempts_to_converge = (a.sessions_converged_after_retry > 0)
             .then(|| attempts_sum as f64 / a.sessions_converged_after_retry as f64);
-        a.repair_success_rate =
-            (a.repairs > 0).then(|| a.repairs_successful as f64 / a.repairs as f64);
+        a.repair_run_passed_rate =
+            (a.repairs > 0).then(|| a.repairs_run_passed as f64 / a.repairs as f64);
+        a.repair_target_resolution_rate = (a.repairs_resolution_assessed > 0)
+            .then(|| a.repairs_target_resolved as f64 / a.repairs_resolution_assessed as f64);
         a
     }
 }
@@ -474,7 +494,7 @@ mod tests {
             ev(
                 8,
                 Event::EvidenceRecorded(mcw::EvidenceArtifact {
-                    level: mcw::EvidenceLevel::L1Observational as i32,
+                    level: mcw::SupportLevel::Observational as i32,
                     ..Default::default()
                 }),
             ),
@@ -519,7 +539,7 @@ mod tests {
         assert_eq!(m.repairs, 1);
         assert_eq!(m.repairs_by_op.get("regrounding"), Some(&1));
         assert_eq!(m.repair_cost_tokens, 120);
-        assert_eq!(m.evidence_by_level.get("l1_observational"), Some(&1));
+        assert_eq!(m.evidence_by_level.get("observational"), Some(&1));
         assert_eq!(m.visit_cap_hits, 1);
         assert_eq!(m.max_node_visits, 2);
         assert_eq!(m.ius_recorded, 1);
@@ -545,7 +565,9 @@ mod tests {
             session_id: "s1".into(),
             status: "succeeded".into(),
             repairs: 1,
-            repairs_successful: 1,
+            repairs_run_passed: 1,
+            repairs_resolution_assessed: 1,
+            repairs_target_resolved: 1,
             repair_cost_tokens: 40,
             ..Default::default()
         };
@@ -566,10 +588,14 @@ mod tests {
         assert_eq!(a.sessions_with_retries, 1);
         assert_eq!(a.sessions_converged_after_retry, 1);
         assert_eq!(a.mean_attempts_to_converge, Some(2.0));
-        assert_eq!(a.repair_success_rate, Some(1.0));
+        assert_eq!(a.repair_run_passed_rate, Some(1.0));
+        assert_eq!(a.repair_target_resolution_rate, Some(1.0));
 
         let none = AggregateMetrics::from_rows(&[]);
-        assert_eq!(none.repair_success_rate, None, "no repairs → null, never 0");
+        assert_eq!(
+            none.repair_target_resolution_rate, None,
+            "unassessed → null, never 0"
+        );
     }
 
     #[test]

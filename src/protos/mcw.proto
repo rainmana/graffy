@@ -66,16 +66,34 @@ message ActorRef {
 // may be stated above the evidence layer that supports it, and summaries must
 // preserve falsification conditions. graffy's verify nodes enforce a per-graph
 // minimum level (policy.evidence.min_level in TOML specs).
-enum EvidenceLevel {
-  EVIDENCE_LEVEL_UNSPECIFIED = 0;
-  // Definitional / illustrative — named constructs, examples, hypotheses.
-  EVIDENCE_LEVEL_L0_DEFINITIONAL = 1;
-  // Practitioner observation — anecdote, single-run traces, expert judgment.
-  EVIDENCE_LEVEL_L1_OBSERVATIONAL = 2;
-  // Empirical — piloted measurement with a reproducible artifact attached.
-  EVIDENCE_LEVEL_L2_EMPIRICAL = 3;
-  // Validated — quantitative, replicated, or externally benchmarked.
-  EVIDENCE_LEVEL_L3_VALIDATED = 4;
+// Graffy's OPERATIONAL claim-support ladder: how strongly a run artifact
+// supports a claim (source quality + provenance). This is NOT the MCW
+// Constitution's Article IV evidence ladder — that ladder grades empirical
+// claims about MCW dynamics and lives in McwEvidenceLayer below. Conflating
+// the two was Blocker A of the 2026-08-30 conformance review.
+enum SupportLevel {
+  SUPPORT_LEVEL_UNSPECIFIED = 0;
+  // Definitional / illustrative — model inference, named constructs.
+  SUPPORT_LEVEL_DEFINITIONAL = 1;
+  // Direct observation — verbatim human input, single-run traces.
+  SUPPORT_LEVEL_OBSERVATIONAL = 2;
+  // Reproducible measurement with the artifact attached.
+  SUPPORT_LEVEL_EMPIRICAL = 3;
+  // Replicated or externally corroborated.
+  SUPPORT_LEVEL_VALIDATED = 4;
+}
+
+// The canonical MCW Constitution Article IV evidence ladder. It grades
+// EMPIRICAL CLAIMS ABOUT MCW DYNAMICS (illustrations, pilots, controlled
+// studies) — never ordinary run artifacts. No graffy runtime path assigns
+// these values to prompts, drafts, or tool results.
+enum McwEvidenceLayer {
+  MCW_EVIDENCE_LAYER_UNSPECIFIED = 0;
+  MCW_EVIDENCE_LAYER_L0_ILLUSTRATION = 1;
+  MCW_EVIDENCE_LAYER_L1_PRACTITIONER_OBSERVATION = 2;
+  MCW_EVIDENCE_LAYER_L2_DESIGNED_PILOT = 3;
+  MCW_EVIDENCE_LAYER_L3_PILOT_WITH_RELIABILITY = 4;
+  MCW_EVIDENCE_LAYER_L4_CONTROLLED_STUDY = 5;
 }
 
 // What kind of artifact backs a claim. Agents default to never executing on
@@ -110,7 +128,7 @@ message EvidenceArtifact {
   ActorRef producer = 6;             // who/what produced it
   string run_id = 7;
   string summary = 8;                // short human-readable description
-  EvidenceLevel level = 9;
+  SupportLevel level = 9;
   // Evidence policy: whether this artifact is surfaced in the UI (strict
   // mode) or recorded but hidden (trace-only mode, e.g. DnD campaigns).
   bool user_visible = 10;
@@ -156,10 +174,13 @@ message IuStageRecord {
   // Representation at this stage: "text", "toml-spec", "diagram",
   // "tool-result", "summary", etc.
   string representation = 4;
-  // Heuristic 0.0–1.0 estimate of meaning survival at this stage
-  // (graffy extension — feeds Overcompression detection; not a canon metric).
-  double fidelity_estimate = 5;
+  // 0.0–1.0 estimate of meaning survival at this stage. ABSENT = unmeasured
+  // (Blocker D: never encode unknown as 1.0 or 0.0). Requires
+  // fidelity_method when set.
+  optional double fidelity_estimate = 5;
   string note = 6;
+  // How fidelity was measured or inferred; required when the estimate is set.
+  string fidelity_method = 7;
 }
 
 // The core coordination payload. Node execution payloads carry IUs, the
@@ -176,14 +197,15 @@ message InformationUnit {
   string run_id = 7;                            // run that recorded it
   // Five-stage lifecycle trace (Selection → Integration).
   repeated IuStageRecord stages = 8;
-  // Current salience weight in the shared coordination state (0.0–1.0).
-  // Re-weighting repairs adjust this explicitly.
-  double salience = 9;
+  // Salience weight. ABSENT = unknown (Blocker E: harness priors must not
+  // masquerade as measurements). Re-weighting repairs adjust this explicitly.
+  optional double salience = 9;
   // Evidence artifacts backing this unit (may be empty for IU kinds that are
   // inherently human-originated, e.g. goals).
   repeated string evidence_ids = 10;
-  // Epistemic ceiling: the strongest claim this IU can lawfully support.
-  EvidenceLevel evidence_level = 11;
+  // Epistemic ceiling: the strongest claim this IU can lawfully support
+  // (operational support, not the MCW Article IV ladder).
+  SupportLevel support_ceiling = 11;
   // IUs this unit corrects or replaces (Correction lineage).
   repeated string supersedes_iu_ids = 12;
   // If this IU preserves a falsification condition from a compacted bundle,
@@ -191,6 +213,13 @@ message InformationUnit {
   string produced_by_compaction_id = 13;
   // Free-form annotations (detector hints, template bindings, etc.).
   map<string, string> attributes = 14;
+  // Provenance of the salience value: "assigned:<policy>" for harness
+  // priors, "measured:<instrument>" only when a study measured it.
+  string salience_source = 15;
+  // Verbatim parent when this IU was produced by declared segmentation of a
+  // coarser IU (Blocker J lineage; empty for top-level IUs). Fine-grained
+  // IU-count / late-discovery claims are invalid without this lineage.
+  string parent_iu_id = 16;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,10 +256,13 @@ message FailureSignal {
   ActorRef detector = 4;            // detector node, monitoring graph, or human
   string session_id = 5;
   string run_id = 6;
-  // Detector confidence 0.0–1.0. Human reports record 1.0.
-  double confidence = 7;
-  // The observable early signal, in plain language (journaled evidence, not
-  // an inference — link artifacts below).
+  // Detector confidence 0.0–1.0 when CALIBRATED. Absent = uncalibrated
+  // hypothesis (model-judge labels are hypotheses, not detected facts —
+  // Blocker F).
+  optional double confidence = 7;
+  // The early-signal text as captured. For model-judge detections this is
+  // the judge's INFERENCE, not ground truth — the linked artifacts below are
+  // the evidence of what the judge actually said.
   string early_signal = 8;
   repeated string implicated_iu_ids = 9;
   repeated string evidence_ids = 10;
@@ -291,7 +323,14 @@ message RepairAction {
   double cost_seconds = 12;
   uint32 cost_turns = 13;
   string summary = 14;
+  // DEPRECATED semantics: true means the repairing RUN passed verify — it
+  // does NOT establish that the target failure was causally resolved
+  // (Blocker G; see target_failure_resolved).
   bool successful = 15;
+  // Whether the SPECIFIC target failure stopped recurring (v1 proxy:
+  // same-mode recurrence in the repairing run; IU-continuity replaces this
+  // once declared segmentation lands). Absent = not established.
+  optional bool target_failure_resolved = 16;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +351,10 @@ enum ScoreSource {
   SCORE_SOURCE_UNSPECIFIED = 0;
   SCORE_SOURCE_HEURISTIC = 1;    // rule-based detector inside the harness
   SCORE_SOURCE_MODEL_JUDGE = 2;  // model-graded (itself a graph, journaled)
-  SCORE_SOURCE_HUMAN_SURVEY = 3; // the in-TUI survey flow
+  SCORE_SOURCE_HUMAN_SURVEY = 3; // participant self-report instruments
+  // An analyst applying the anchored rubric to a transcript/projection
+  // (Blocker I: not the same provenance as a participant survey).
+  SCORE_SOURCE_HUMAN_RATER = 4;
 }
 
 // One H/R/D/M observation.
@@ -332,6 +374,20 @@ message HrdmSample {
   string rubric_version = 10;
   string rater_id = 11;
   string note = 12;
+  // Stable unit id ("window:3", "repair_episode:turn-7") for the rated unit.
+  string unit_id = 13;
+  // journal://<run_id>/<seq> references backing this score. A score whose
+  // anchor depends on observed events and cites nothing is not valid.
+  repeated string evidence_refs = 14;
+  // Immutable adaptation pin (e.g. "graffy-journal-map@v1-draft").
+  string adaptation_version = 15;
+  string blinding_profile = 16;
+  string segmentation_version = 17;
+  // "calibration" while the adaptation is draft; "study" only after
+  // conformance gates pass and the framework author ratifies.
+  string calibration_status = 18;
+  // Per-proxy unratable reasons ("M: record incomplete — ...").
+  string unratable_reasons = 19;
 }
 
 // The structural vector of H/R/D/M over time for a session — what the eval

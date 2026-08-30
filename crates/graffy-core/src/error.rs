@@ -16,6 +16,8 @@ pub enum SpecError {
 /// Errors compiling a spec into an executable topology.
 #[derive(Debug, Error)]
 pub enum CompileError {
+    #[error("invalid graph: {0}")]
+    Invalid(String),
     #[error("duplicate node id '{0}'")]
     DuplicateNode(String),
     #[error("edge references unknown node '{0}'")]

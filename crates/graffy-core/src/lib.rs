@@ -11,6 +11,7 @@
 //!   `graffy.journal.v1.RunEvent` frames) with reader + reference fold.
 //! * [`id`] — ULID-backed identifiers for every durable object.
 
+pub mod boundary;
 pub mod error;
 pub mod exec;
 pub mod graph;
