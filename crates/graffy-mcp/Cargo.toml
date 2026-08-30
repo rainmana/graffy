@@ -1,6 +1,6 @@
 [package]
 name = "graffy-mcp"
-description = "MCP integration (Phase 2): rmcp-backed client manager exposing every connected MCP tool as an invocable graph node."
+description = "MCP integration: rmcp-backed client, discovery with annotation-seeded roles, and facade-graph generation (docs/design/phase-2-mcp.md)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,3 +8,11 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+graffy-core.workspace = true
+async-trait.workspace = true
+rmcp.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true

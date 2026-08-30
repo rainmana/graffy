@@ -209,6 +209,10 @@ impl ModelInvoker for OfflineEcho {
     async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
         let text = if request.purpose == "verify" {
             "PASS — offline echo judge (no real model was consulted)".to_owned()
+        } else if request.purpose == "prepare" {
+            // Facade prepare stub: parseable-but-empty arguments, so offline
+            // runs exercise the tool plane without inventing arguments.
+            "{}".to_owned()
         } else {
             format!(
                 "[offline echo — no real model was consulted]\n{}",
@@ -716,7 +720,12 @@ impl NodeBehavior for ModelNode {
             assembled
         };
 
-        let response = ctx.call_model("draft", system, prompt).await?;
+        let purpose = if ctx.param_str("iu_role").as_deref() == Some("tool-args") {
+            "prepare"
+        } else {
+            "draft"
+        };
+        let response = ctx.call_model(purpose, system, prompt).await?;
 
         let mut out = NodeOutput::default();
         let evidence_id = EvidenceId::generate().to_string();

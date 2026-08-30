@@ -45,7 +45,7 @@ rigs = "0.0.8"           # multi-agent orchestration on top of rig — MIT
 libsql = { version = "0.9", default-features = false, features = ["core"] }
 
 # --- runtime & plumbing ---
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "signal"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "signal"] }
 petgraph = "0.8"
 thiserror = "2.0"
 anyhow = "1.0"
@@ -81,6 +81,7 @@ authors.workspace = true
 [dependencies]
 graffy-core.workspace = true
 graffy-graphs.workspace = true
+graffy-mcp.workspace = true
 graffy-memory.workspace = true
 graffy-proto.workspace = true
 graffy-providers.workspace = true
@@ -89,6 +90,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 directories.workspace = true
+serde_json.workspace = true
 # Async runtime at the root from day one (ADR-0001): the Ratatui event loop
 # must stay non-blocking while the executor concurrently streams model tokens
 # and processes IUs. Workspace features include `macros` + `rt-multi-thread`.

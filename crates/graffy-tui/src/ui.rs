@@ -26,7 +26,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use graffy_core::error::ExecError;
 use graffy_core::exec::{
-    ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, RunInput, RunOutcome,
+    ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, RunInput, RunOutcome, ToolInvoker,
 };
 use graffy_core::journal::{JournalReader, wire};
 use graffy_core::spec::GraphSpec;
@@ -112,11 +112,13 @@ pub async fn run_live(
     prompt: String,
     journal_path: PathBuf,
     invoker: Arc<dyn ModelInvoker>,
+    tool_invoker: Option<Arc<dyn ToolInvoker>>,
 ) -> Result<Option<RunOutcome>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let executor = Executor {
         event_tap: Some(tx),
+        tool_invoker,
         ..Default::default()
     };
 

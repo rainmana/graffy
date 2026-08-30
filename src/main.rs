@@ -8,12 +8,14 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
+use graffy_core::exec::ToolInvoker;
 use graffy_core::exec::{
     ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, OfflineEcho, RunInput,
 };
 use graffy_core::journal::{JournalReader, event_kind, summarize, wire};
 use graffy_core::spec::GraphSpec;
-use graffy_memory::{RunRecord, Store};
+use graffy_mcp::{LiveServer, RegistryToolInvoker, ServerBinding};
+use graffy_memory::{McpServerRecord, RunRecord, Store};
 use graffy_providers::RigInvoker;
 
 #[derive(Parser)]
@@ -76,8 +78,38 @@ enum Command {
         #[command(subcommand)]
         command: GraphCommand,
     },
+    /// Manage MCP servers: add (discovery + facade generation) and list.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Print environment diagnostics.
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Connect a stdio MCP server, discover its tools, seed roles from
+    /// annotations, and register skill-fronted facade graphs.
+    Add {
+        /// Logical server name (graphs reference this, never the transport).
+        name: String,
+        /// The stdio command line, quoted (e.g. "npx -y @modelcontextprotocol/server-everything").
+        #[arg(long)]
+        stdio: String,
+        /// Default role for unannotated tools: evidence | effector
+        /// (default effector — the conservative choice).
+        #[arg(long)]
+        role: Option<String>,
+        /// Evidence level granted to this server's results (L0|L1|L2).
+        #[arg(long, default_value = "L1")]
+        evidence_level: String,
+        /// Register the server without generating facade graphs.
+        #[arg(long)]
+        no_facades: bool,
+    },
+    /// List registered MCP servers.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -137,6 +169,16 @@ async fn main() -> anyhow::Result<()> {
             GraphCommand::List => graph_list().await,
             GraphCommand::Export { id, out } => graph_export(id, out).await,
             GraphCommand::Import { path } => graph_import(path).await,
+        },
+        Command::Mcp { command } => match command {
+            McpCommand::Add {
+                name,
+                stdio,
+                role,
+                evidence_level,
+                no_facades,
+            } => mcp_add(name, stdio, role, evidence_level, no_facades).await,
+            McpCommand::List => mcp_list().await,
         },
         Command::Doctor => doctor().await,
     }
@@ -227,6 +269,7 @@ async fn run_graph(
         PathBuf::from("graffy-runs").join(format!("{}.journal", ulid_like_stamp()))
     });
     let invoker = build_invoker(offline);
+    let tool_plane = build_tool_plane(&spec).await?;
 
     let outcome = if tui {
         let Some(outcome) = graffy_tui::run_live(
@@ -235,6 +278,7 @@ async fn run_graph(
             prompt,
             journal_path.clone(),
             invoker,
+            tool_plane.clone(),
         )
         .await?
         else {
@@ -246,7 +290,11 @@ async fn run_graph(
             "graph '{}' v{} — executing (every step journaled)",
             spec.graph.name, spec.graph.version
         );
-        Executor::default()
+        let executor = Executor {
+            tool_invoker: tool_plane.clone(),
+            ..Default::default()
+        };
+        executor
             .run(
                 &spec,
                 &spec_text,
@@ -276,8 +324,6 @@ async fn run_graph(
         outcome.journal_path.display()
     );
 
-    // Index the run + mirror the journal (best-effort: the journal file is
-    // already durable; the store is the queryable index of it).
     match index_run(&spec, &spec_text, &outcome).await {
         Ok(events) => println!(
             "stored  : run indexed, {events} events mirrored to {}",
@@ -292,6 +338,169 @@ async fn run_graph(
         println!("\n================ verified response ================\n{text}");
     }
     Ok(())
+}
+
+/// Connect the MCP servers a spec's tool.invoke nodes reference (design doc
+/// §5: specs name servers logically; the store binds transports).
+async fn build_tool_plane(spec: &GraphSpec) -> anyhow::Result<Option<Arc<dyn ToolInvoker>>> {
+    let needed: std::collections::BTreeSet<String> = spec
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "tool.invoke")
+        .filter_map(|n| {
+            n.params
+                .get("server")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .collect();
+    if needed.is_empty() {
+        return Ok(None);
+    }
+    let store = open_store().await?;
+    let mut bindings = Vec::new();
+    for name in &needed {
+        let Some(record) = store.get_mcp_server(name).await? else {
+            anyhow::bail!(
+                "this graph needs MCP server '{name}', which is not registered — \
+                 run: graffy mcp add {name} --stdio \"<command…>\""
+            );
+        };
+        if record.transport != "stdio" {
+            anyhow::bail!(
+                "server '{name}' uses transport '{}' — only stdio is wired in this slice",
+                record.transport
+            );
+        }
+        bindings.push(ServerBinding {
+            name: record.name,
+            command: record.command,
+            args: record.args.split_whitespace().map(str::to_owned).collect(),
+        });
+    }
+    println!(
+        "tool plane: connecting {}",
+        needed.iter().cloned().collect::<Vec<_>>().join(", ")
+    );
+    let invoker = RegistryToolInvoker::connect_all(bindings).await?;
+    Ok(Some(Arc::new(invoker)))
+}
+
+async fn mcp_add(
+    name: String,
+    stdio: String,
+    role: Option<String>,
+    evidence_level: String,
+    no_facades: bool,
+) -> anyhow::Result<()> {
+    let mut parts = stdio.split_whitespace().map(str::to_owned);
+    let command = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("--stdio needs a command line"))?;
+    let args: Vec<String> = parts.collect();
+    println!(
+        "connecting '{name}' via stdio: {command} {}",
+        args.join(" ")
+    );
+    let server = LiveServer::connect_stdio(&command, &args).await?;
+    let discovery = server.discover().await?;
+
+    let server_default = role.as_deref().unwrap_or("effector");
+    println!("\ndiscovered {} tools:", discovery.tools.len());
+    for tool in &discovery.tools {
+        let seeded = graffy_mcp::seed_role(tool, server_default);
+        println!(
+            "  {:<28} role: {:<9} read_only:{:<12} destructive:{:<12} {}",
+            tool.name,
+            seeded,
+            format!("{:?}", tool.read_only),
+            format!("{:?}", tool.destructive),
+            truncate_chars(&tool.description, 44)
+        );
+    }
+
+    let store = open_store().await?;
+    let tools_meta: Vec<serde_json::Value> = discovery
+        .tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "read_only": t.read_only,
+                "destructive": t.destructive,
+            })
+        })
+        .collect();
+    store
+        .add_mcp_server(&McpServerRecord {
+            name: name.clone(),
+            transport: "stdio".to_owned(),
+            command,
+            args: args.join(" "),
+            role_default: server_default.to_owned(),
+            evidence_level: evidence_level.clone(),
+            tools_json: serde_json::to_string(&tools_meta)?,
+            added_at: unix_now_secs(),
+        })
+        .await?;
+
+    let mut facades = 0usize;
+    if !no_facades {
+        for tool in &discovery.tools {
+            let seeded = graffy_mcp::seed_role(tool, server_default);
+            let facade = graffy_mcp::generate_facade(&name, tool, seeded, &evidence_level, None);
+            let toml_text = facade.to_toml_string()?;
+            store.register_graph(&toml_text, "mcp-facade").await?;
+            facades += 1;
+        }
+    }
+    server.shutdown().await;
+
+    println!("\nregistered server '{name}' with {facades} skill-fronted facade graphs");
+    println!("list them : graffy graph list");
+    println!(
+        "run one   : graffy run graffy.mcp.{}.<tool> --prompt \"…\" [--offline] [--tui]",
+        name
+    );
+    Ok(())
+}
+
+async fn mcp_list() -> anyhow::Result<()> {
+    let store = open_store().await?;
+    let servers = store.list_mcp_servers().await?;
+    if servers.is_empty() {
+        println!("no MCP servers registered — graffy mcp add <name> --stdio \"<command…>\"");
+        return Ok(());
+    }
+    println!(
+        "{:<16} {:<8} {:<10} {:<6} command",
+        "name", "trans", "role", "level"
+    );
+    for s in servers {
+        println!(
+            "{:<16} {:<8} {:<10} {:<6} {} {}",
+            s.name, s.transport, s.role_default, s.evidence_level, s.command, s.args
+        );
+    }
+    Ok(())
+}
+
+fn truncate_chars(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_owned()
+    } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 async fn index_run(
