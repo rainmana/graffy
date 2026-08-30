@@ -12,7 +12,7 @@ use graffy_core::exec::ToolInvoker;
 use graffy_core::exec::{
     ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, OfflineEcho, RunInput, RunOutcome,
 };
-use graffy_core::journal::{JournalReader, event_kind, summarize, wire};
+use graffy_core::journal::{JournalReader, JournalWriter, event_kind, summarize, wire};
 use graffy_core::spec::GraphSpec;
 use graffy_mcp::{LiveServer, RegistryToolInvoker, ServerBinding};
 use graffy_memory::{McpServerRecord, RunRecord, Store};
@@ -48,6 +48,19 @@ enum Command {
         /// Emit machine-readable JSON instead of the text summary.
         #[arg(long)]
         json: bool,
+    },
+    /// Score a session's coordination health against the HRDM anchors
+    /// (docs/mcw/hrdm-in-graffy.md). Judgments are yours; samples are
+    /// journaled observations, never computed scores.
+    Rate {
+        /// Session id to rate (its runs are found in the runs directory).
+        session: String,
+        /// Directory of .journal files (default: <home>/runs).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Rater identity stamped on every sample (default: $USER).
+        #[arg(long)]
+        rater: Option<String>,
     },
     Run {
         /// Path to a TOML graph spec (see graphs/), or a registered graph id.
@@ -184,6 +197,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Tui => graffy_tui::run_home(&runs_dir()),
         Command::Init => cmd_init().await,
         Command::Metrics { dir, json } => cmd_metrics(dir, json),
+        Command::Rate {
+            session,
+            dir,
+            rater,
+        } => cmd_rate(session, dir, rater),
         Command::Run {
             spec,
             prompt,
@@ -342,10 +360,12 @@ fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
         }
     }
     let aggregate = AggregateMetrics::from_rows(&rows);
+    let sessions = graffy_core::metrics::sessions_from_rows(&rows);
     if json {
         let report = MetricsReport {
             generated_by: format!("graffy {}", env!("CARGO_PKG_VERSION")),
             runs: rows,
+            sessions,
             aggregate,
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -405,6 +425,23 @@ fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
         "  convergence  : {} runs hit a visit cap · mean escalations/run {:.2}",
         aggregate.runs_with_cap_hits, aggregate.mean_escalations_per_run
     );
+    println!(
+        "  sessions     : {} · {} retried · {} converged after retry (mean attempts {})",
+        aggregate.sessions,
+        aggregate.sessions_with_retries,
+        aggregate.sessions_converged_after_retry,
+        aggregate
+            .mean_attempts_to_converge
+            .map(|v| format!("{v:.1}"))
+            .unwrap_or_else(|| "n/a".to_owned())
+    );
+    println!(
+        "  repair fx    : {} of {} repairs succeeded ({})",
+        aggregate.repairs_successful,
+        aggregate.repairs,
+        rate_str(aggregate.repair_success_rate)
+    );
+    let _ = &sessions;
     println!(
         "  hrdm samples : {} (rubric-scored — see docs/design/phase-3-learning.md)",
         aggregate.hrdm_samples
@@ -660,6 +697,219 @@ async fn report_outcome(spec: &GraphSpec, spec_text: &str, outcome: RunOutcome) 
     if let Some(text) = outcome.final_text {
         println!("\n================ verified response ================\n{text}");
     }
+}
+
+/// Rubric version stamped on every sample this build produces. The
+/// `-draft` suffix drops only when the framework author ratifies
+/// docs/mcw/hrdm-in-graffy.md — scores across versions are not comparable.
+const HRDM_RUBRIC_VERSION: &str = "mcw-hrdm@v0.2 + graffy-adaptation@v1-draft";
+
+enum ScoreAnswer {
+    Score(i32),
+    Unratable,
+    Abort,
+}
+
+/// Read one anchored score from stdin: 0–3, 'u' (unratable — recorded as
+/// absent, never guessed), or 'q'/EOF (abort — silence never registers).
+fn ask_score(lines: &mut dyn Iterator<Item = std::io::Result<String>>, label: &str) -> ScoreAnswer {
+    loop {
+        println!("{label} [0-3 / u / q]:");
+        match lines.next() {
+            None | Some(Err(_)) => return ScoreAnswer::Abort,
+            Some(Ok(line)) => match line.trim() {
+                "q" | "Q" => return ScoreAnswer::Abort,
+                "u" | "U" => return ScoreAnswer::Unratable,
+                s => {
+                    if let Ok(v) = s.parse::<i32>()
+                        && (0..=3).contains(&v)
+                    {
+                        return ScoreAnswer::Score(v);
+                    }
+                    println!("  enter 0-3, 'u' for unratable, or 'q' to abort");
+                }
+            },
+        }
+    }
+}
+
+fn rating_aborted() -> anyhow::Result<()> {
+    println!("\naborted — nothing was recorded (silence never registers).");
+    Ok(())
+}
+
+/// `graffy rate <session>` — human H/R/D/M sampling per
+/// docs/mcw/hrdm-in-graffy.md. graffy does the mechanical work (finding the
+/// session's runs, proposing windows and repair episodes); the anchored
+/// judgments are the human's. Samples land in a rating journal that
+/// `graffy metrics` reads like any other.
+fn cmd_rate(session: String, dir: Option<PathBuf>, rater: Option<String>) -> anyhow::Result<()> {
+    use graffy_core::metrics::{RunMetrics, propose_episodes, propose_windows};
+    use std::io::BufRead;
+
+    let dir = dir.unwrap_or_else(runs_dir);
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "journal"))
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort();
+    let mut rows: Vec<RunMetrics> = Vec::new();
+    for p in &paths {
+        if let Ok(events) = JournalReader::read_all(p) {
+            let m = RunMetrics::fold(&events);
+            if m.session_id == session && m.graph_id != "graffy.mcw.rating" {
+                rows.push(m);
+            }
+        }
+    }
+    if rows.is_empty() {
+        anyhow::bail!(
+            "no runs found for session '{session}' in {} — `graffy runs` lists sessions",
+            dir.display()
+        );
+    }
+
+    println!(
+        "rating session {session} — {} run(s) · scale 0-3 · 'u' unratable · 'q' abort",
+        rows.len()
+    );
+    println!("anchors: docs/mcw/hrdm-in-graffy.md (graffy) + hrdm_rubrics.md (framework)\n");
+    for (i, r) in rows.iter().enumerate() {
+        println!(
+            "  run {} — {}  {:<9} failures {:?}  repairs {}",
+            i + 1,
+            r.run_id,
+            r.status,
+            r.failures_by_mode,
+            r.repairs
+        );
+    }
+
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let rater_id = rater
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_else(|| "human".to_owned());
+    let mut samples: Vec<graffy_proto::mcw::v1::HrdmSample> = Vec::new();
+    let base_sample = |scope: String, run_id: String| graffy_proto::mcw::v1::HrdmSample {
+        sampled_at: Some(graffy_core::exec::now_ts()),
+        session_id: session.clone(),
+        run_id,
+        scope,
+        health: None,
+        repair_cost: None,
+        drift: None,
+        misattribution: None,
+        source: graffy_proto::mcw::v1::ScoreSource::HumanSurvey as i32,
+        rubric_version: HRDM_RUBRIC_VERSION.to_owned(),
+        rater_id: rater_id.clone(),
+        note: String::new(),
+    };
+
+    for (wi, (start, end)) in propose_windows(rows.len()).into_iter().enumerate() {
+        println!(
+            "\nwindow {} (runs {}-{}) — H, D, M are scored per window:",
+            wi + 1,
+            start + 1,
+            end + 1
+        );
+        let h = match ask_score(
+            &mut lines,
+            "  H — shared understanding (3 strong … 0 broken)",
+        ) {
+            ScoreAnswer::Abort => return rating_aborted(),
+            ScoreAnswer::Unratable => None,
+            ScoreAnswer::Score(v) => Some(v),
+        };
+        let d = match ask_score(
+            &mut lines,
+            "  D — drift via late discoveries (0 stable … 3 rapid)",
+        ) {
+            ScoreAnswer::Abort => return rating_aborted(),
+            ScoreAnswer::Unratable => None,
+            ScoreAnswer::Score(v) => Some(v),
+        };
+        println!("  (M needs capability-blame evidence in YOUR OWN prompts — 'u' if none)");
+        let m = match ask_score(&mut lines, "  M — capability-blame (0 none … 3 frequent)") {
+            ScoreAnswer::Abort => return rating_aborted(),
+            ScoreAnswer::Unratable => None,
+            ScoreAnswer::Score(v) => Some(v),
+        };
+        let mut s = base_sample(format!("window:{}", wi + 1), String::new());
+        s.health = h;
+        s.drift = d;
+        s.misattribution = m;
+        samples.push(s);
+    }
+
+    let episodes = propose_episodes(&rows);
+    if episodes.is_empty() {
+        println!("\nno repair episodes proposed (no retry-carrying runs) — R not scored.");
+    }
+    for (ei, (start, end)) in episodes.into_iter().enumerate() {
+        println!(
+            "\nrepair episode {} (runs {}-{}) — R is scored per episode:",
+            ei + 1,
+            start + 1,
+            end + 1
+        );
+        let r = match ask_score(&mut lines, "  R — repair cost (0 low … 3 high)") {
+            ScoreAnswer::Abort => return rating_aborted(),
+            ScoreAnswer::Unratable => None,
+            ScoreAnswer::Score(v) => Some(v),
+        };
+        let mut s = base_sample(
+            format!("repair_episode:{}", rows[start].run_id),
+            rows[end].run_id.clone(),
+        );
+        s.repair_cost = r;
+        samples.push(s);
+    }
+
+    if samples.iter().all(|s| {
+        s.health.is_none()
+            && s.repair_cost.is_none()
+            && s.drift.is_none()
+            && s.misattribution.is_none()
+    }) {
+        println!("\nevery unit was unratable — recording nothing rather than noise.");
+        return Ok(());
+    }
+
+    let pseudo_run = graffy_core::id::RunId::generate().to_string();
+    let out_path = dir.join(format!("{}-rating.journal", ulid_like_stamp()));
+    let mut writer = JournalWriter::create(&out_path, &pseudo_run)?;
+    use graffy_core::journal::wire::run_event::Event as JEvent;
+    writer.append(JEvent::RunStarted(wire::RunManifest {
+        run_id: pseudo_run.clone(),
+        graph_id: "graffy.mcw.rating".to_owned(),
+        graph_name: "HRDM rating session".to_owned(),
+        graph_version: env!("CARGO_PKG_VERSION").to_owned(),
+        spec_sha256: String::new(),
+        session_id: session.clone(),
+        started_at: Some(graffy_core::exec::now_ts()),
+        evidence_mode: "strict".to_owned(),
+        evidence_min_level: String::new(),
+        graffy_version: env!("CARGO_PKG_VERSION").to_owned(),
+    }))?;
+    let count = samples.len();
+    for s in samples {
+        writer.append(JEvent::HrdmSampled(s))?;
+    }
+    writer.append(JEvent::RunFinished(wire::RunFinished {
+        status: wire::RunStatus::Succeeded as i32,
+        summary: format!(
+            "hrdm rating: {count} sample(s) by {rater_id} against {HRDM_RUBRIC_VERSION}"
+        ),
+        ..Default::default()
+    }))?;
+    println!("\nrecorded {count} sample(s) → {}", out_path.display());
+    println!("they appear in `graffy metrics` immediately (hrdm samples).");
+    Ok(())
 }
 
 /// Connect the MCP servers a spec's tool.invoke nodes reference (design doc

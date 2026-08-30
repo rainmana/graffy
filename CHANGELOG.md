@@ -2,6 +2,18 @@
 
 ## Unreleased (v0.1.0-alpha.6)
 
+- **`graffy rate <session>`** — the first HRDM collection path: graffy does
+  the mechanical work (finds the session's runs, proposes 5-run windows and
+  repair episodes per the adaptation doc), the human makes the anchored
+  0-3 judgments (H/D/M per window, R per episode; 'u' records unratable as
+  absent, EOF/q aborts recording nothing). Samples carry rater, source
+  (HUMAN_SURVEY), and a pinned rubric_version, and land in a rating journal
+  `graffy metrics` reads like any other. graffy never scores itself.
+- **Session convergence metrics**: `graffy metrics` now folds sessions —
+  attempts-to-pass, sessions converged after retry, mean attempts to
+  converge, and repair efficacy (successful/total RepairActions, null when
+  none ran) — the C2 research numbers, from real journals only.
+
 - **C2 — retry-with-feedback**: `graffy run --retry <n|auto>`. Failed runs
   re-execute in the same session with the judge's critique injected as
   CORRECTION IUs (on the same review-feedback channel the in-run revise

@@ -108,8 +108,10 @@ canonical units live — drafted as a declared Article V extension in
 `docs/mcw/hrdm-in-graffy.md` (awaiting the author's ratification).
 
 Collection paths once the rubric exists:
-1. `graffy rate <journal>` — human scores a finished run against the
-   anchors (source: HUMAN).
+1. `graffy rate <session>` — **SHIPPED v1**: human scores proposed windows
+   (H/D/M) and repair episodes (R) against the anchors; unratable units are
+   recorded as absent; samples land in rating journals with rater +
+   rubric_version (source: HUMAN_SURVEY).
 2. A rater graph (C3 kin) — a model scores the same journals against the
    same anchors (source: MODEL).
 3. **Inter-rater agreement between 1 and 2 is itself a publishable

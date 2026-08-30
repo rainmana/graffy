@@ -61,6 +61,8 @@ pub struct RunMetrics {
     pub graph_name: String,
     pub spec_sha256: String,
     pub graffy_version: String,
+    /// Coordination session this run belonged to (links retry attempts).
+    pub session_id: String,
     /// Terminal status label (`succeeded`, `failed`, `budget_exhausted`, …);
     /// `unfinished` when the journal has no RunFinished frame.
     pub status: String,
@@ -79,6 +81,8 @@ pub struct RunMetrics {
     pub repairs: u64,
     pub repairs_by_op: BTreeMap<String, u64>,
     pub repair_cost_tokens: u64,
+    /// Repairs whose attempt ended in a passing run (honest outcomes only).
+    pub repairs_successful: u64,
     /// Evidence artifacts recorded, by epistemic level (l0–l3).
     pub evidence_artifacts: u64,
     pub evidence_by_level: BTreeMap<String, u64>,
@@ -117,6 +121,7 @@ impl RunMetrics {
                     m.graph_name = man.graph_name.clone();
                     m.spec_sha256 = man.spec_sha256.clone();
                     m.graffy_version = man.graffy_version.clone();
+                    m.session_id = man.session_id.clone();
                 }
                 Event::RunFinished(fin) => {
                     m.status = run_status_label(fin.status);
@@ -136,6 +141,9 @@ impl RunMetrics {
                 }
                 Event::RepairExecuted(r) => {
                     m.repairs += 1;
+                    if r.successful {
+                        m.repairs_successful += 1;
+                    }
                     m.repair_cost_tokens += r.cost_tokens;
                     *m.repairs_by_op
                         .entry(repair_op_label(r.operation))
@@ -180,6 +188,94 @@ impl RunMetrics {
     }
 }
 
+/// Session-level convergence view: one row per coordination session,
+/// folding its runs IN ORDER (C2 retry chains are repair episodes).
+#[derive(Debug, Serialize)]
+pub struct SessionMetrics {
+    pub session_id: String,
+    pub runs: u64,
+    /// 1-based index of the first succeeded run, if any (attempts-to-pass).
+    pub attempts_to_pass: Option<u32>,
+    pub converged: bool,
+    pub repairs: u64,
+    pub repairs_successful: u64,
+    pub repair_cost_tokens: u64,
+    pub failure_signals: u64,
+}
+
+/// Group per-run rows into session rows, preserving row order (journals
+/// sort chronologically by their ULID-stamped filenames). Rating
+/// pseudo-runs are excluded — a rating observes a session, it is not an
+/// attempt within one.
+pub fn sessions_from_rows(rows: &[RunMetrics]) -> Vec<SessionMetrics> {
+    let mut order: Vec<String> = Vec::new();
+    let mut map: BTreeMap<String, SessionMetrics> = BTreeMap::new();
+    for r in rows {
+        if r.session_id.is_empty() || r.graph_id == "graffy.mcw.rating" {
+            continue;
+        }
+        let entry = map.entry(r.session_id.clone()).or_insert_with(|| {
+            order.push(r.session_id.clone());
+            SessionMetrics {
+                session_id: r.session_id.clone(),
+                runs: 0,
+                attempts_to_pass: None,
+                converged: false,
+                repairs: 0,
+                repairs_successful: 0,
+                repair_cost_tokens: 0,
+                failure_signals: 0,
+            }
+        });
+        entry.runs += 1;
+        if r.status == "succeeded" && entry.attempts_to_pass.is_none() {
+            entry.attempts_to_pass = Some(entry.runs as u32);
+            entry.converged = true;
+        }
+        entry.repairs += r.repairs;
+        entry.repairs_successful += r.repairs_successful;
+        entry.repair_cost_tokens += r.repair_cost_tokens;
+        entry.failure_signals += r.failure_signals;
+    }
+    order.into_iter().filter_map(|k| map.remove(&k)).collect()
+}
+
+/// Mechanical window proposal per the HRDM adaptation: five consecutive
+/// exchanges (runs) per window, final partial window included. Inclusive
+/// (start, end) row indices — the human rater confirms or corrects.
+pub fn propose_windows(runs: usize) -> Vec<(usize, usize)> {
+    if runs == 0 {
+        return Vec::new();
+    }
+    (0..runs)
+        .step_by(5)
+        .map(|s| (s, (s + 4).min(runs - 1)))
+        .collect()
+}
+
+/// Mechanical repair-episode proposal: a span opening at the first
+/// non-succeeded run and closing at the first succeeded run at-or-after a
+/// repair-carrying run (or the last run). Proposed only when some run
+/// actually journaled repairs; v1 proposes at most one episode. A proposal
+/// is an assist for the rater, never a score.
+pub fn propose_episodes(rows: &[RunMetrics]) -> Vec<(usize, usize)> {
+    let Some(first_repair) = rows.iter().position(|r| r.repairs > 0) else {
+        return Vec::new();
+    };
+    let start = rows[..first_repair]
+        .iter()
+        .position(|r| r.status != "succeeded")
+        .unwrap_or(first_repair);
+    let end = rows
+        .iter()
+        .enumerate()
+        .skip(first_repair)
+        .find(|(_, r)| r.status == "succeeded")
+        .map(|(i, _)| i)
+        .unwrap_or(rows.len() - 1);
+    vec![(start, end)]
+}
+
 /// Cross-run aggregate — the numbers a paper cites.
 #[derive(Debug, Default, Serialize)]
 pub struct AggregateMetrics {
@@ -209,6 +305,15 @@ pub struct AggregateMetrics {
     /// Runs where some node exhausted its visit cap (convergence exhaustion).
     pub runs_with_cap_hits: u64,
     pub mean_escalations_per_run: f64,
+    /// Session-level convergence (C2): sessions, how many retried, and how
+    /// many of those converged — plus the mean attempts-to-pass among them.
+    pub sessions: u64,
+    pub sessions_with_retries: u64,
+    pub sessions_converged_after_retry: u64,
+    pub mean_attempts_to_converge: Option<f64>,
+    /// Successful RepairActions / all RepairActions (`null` when none ran).
+    pub repairs_successful: u64,
+    pub repair_success_rate: Option<f64>,
 }
 
 impl AggregateMetrics {
@@ -230,6 +335,7 @@ impl AggregateMetrics {
             a.ius_recorded += r.ius_recorded;
             a.failure_signals += r.failure_signals;
             a.repairs += r.repairs;
+            a.repairs_successful += r.repairs_successful;
             a.repair_cost_tokens += r.repair_cost_tokens;
             a.evidence_artifacts += r.evidence_artifacts;
             a.hrdm_samples += r.hrdm_samples;
@@ -267,6 +373,22 @@ impl AggregateMetrics {
         } else {
             0.0
         };
+        let sessions = sessions_from_rows(rows);
+        a.sessions = sessions.len() as u64;
+        let mut attempts_sum = 0u64;
+        for s in &sessions {
+            if s.runs > 1 {
+                a.sessions_with_retries += 1;
+                if let Some(n) = s.attempts_to_pass {
+                    a.sessions_converged_after_retry += 1;
+                    attempts_sum += u64::from(n);
+                }
+            }
+        }
+        a.mean_attempts_to_converge = (a.sessions_converged_after_retry > 0)
+            .then(|| attempts_sum as f64 / a.sessions_converged_after_retry as f64);
+        a.repair_success_rate =
+            (a.repairs > 0).then(|| a.repairs_successful as f64 / a.repairs as f64);
         a
     }
 }
@@ -276,6 +398,7 @@ impl AggregateMetrics {
 pub struct MetricsReport {
     pub generated_by: String,
     pub runs: Vec<RunMetrics>,
+    pub sessions: Vec<SessionMetrics>,
     pub aggregate: AggregateMetrics,
 }
 
@@ -408,6 +531,72 @@ mod tests {
         let m = RunMetrics::fold(events);
         assert_eq!(m.status, "unfinished");
         assert_eq!(m.input_tokens, 0, "no RunFinished frame means no totals");
+    }
+
+    #[test]
+    fn sessions_fold_retry_chains_into_convergence_rows() {
+        let r1 = RunMetrics {
+            session_id: "s1".into(),
+            status: "failed".into(),
+            failure_signals: 2,
+            ..Default::default()
+        };
+        let r2 = RunMetrics {
+            session_id: "s1".into(),
+            status: "succeeded".into(),
+            repairs: 1,
+            repairs_successful: 1,
+            repair_cost_tokens: 40,
+            ..Default::default()
+        };
+        let solo = RunMetrics {
+            session_id: "s2".into(),
+            status: "succeeded".into(),
+            ..Default::default()
+        };
+        let sessions = sessions_from_rows(&[r1.clone(), r2.clone(), solo]);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].runs, 2);
+        assert_eq!(sessions[0].attempts_to_pass, Some(2));
+        assert!(sessions[0].converged);
+        assert_eq!(sessions[0].repair_cost_tokens, 40);
+
+        let a = AggregateMetrics::from_rows(&[r1, r2]);
+        assert_eq!(a.sessions, 1);
+        assert_eq!(a.sessions_with_retries, 1);
+        assert_eq!(a.sessions_converged_after_retry, 1);
+        assert_eq!(a.mean_attempts_to_converge, Some(2.0));
+        assert_eq!(a.repair_success_rate, Some(1.0));
+
+        let none = AggregateMetrics::from_rows(&[]);
+        assert_eq!(none.repair_success_rate, None, "no repairs → null, never 0");
+    }
+
+    #[test]
+    fn window_and_episode_proposals_are_mechanical() {
+        assert_eq!(propose_windows(7), vec![(0, 4), (5, 6)]);
+        assert!(propose_windows(0).is_empty());
+        assert!(propose_episodes(&[]).is_empty());
+        let rows = vec![
+            RunMetrics {
+                status: "failed".into(),
+                ..Default::default()
+            },
+            RunMetrics {
+                status: "succeeded".into(),
+                repairs: 1,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(propose_episodes(&rows), vec![(0, 1)]);
+        let no_repairs = vec![RunMetrics {
+            status: "failed".into(),
+            ..Default::default()
+        }];
+        assert!(
+            propose_episodes(&no_repairs).is_empty(),
+            "no repairs → no proposed episode"
+        );
     }
 
     #[test]

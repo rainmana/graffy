@@ -112,7 +112,7 @@ auto-computed** in this adaptation. A model may *rate* — as a rater, under
 
 ## 5. Raters, blinding, and the dual-rater configuration
 
-- **Human rater:** `graffy rate <session>` (planned; issue #4) walks the
+- **Human rater:** `graffy rate <session>` (shipped v1) walks the
   windows/episodes, shows the evidence, records 0–3 scores or unratable →
   `HrdmSample{source: HUMAN, rater_id, rubric_version}`.
 - **Model rater (declared methodological extension):** a rater *graph*
