@@ -1,0 +1,63 @@
+name: Release
+
+# Single-binary distribution for macOS + Linux (ADR-0002).
+# Tag a version (v0.1.0) to build and attach binaries to a GitHub Release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --bin graffy
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/graffy" dist/
+          cp LICENSE NOTICE.md README.md dist/
+          tar -C dist -czf "graffy-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: graffy-${{ matrix.target }}
+          path: graffy-*.tar.gz
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.tar.gz
+          generate_release_notes: true
