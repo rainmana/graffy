@@ -2,10 +2,15 @@
 
 ## v0.1.0-alpha.2 — first version-correct release (2026-08-29)
 
-Housekeeping release: version strings now match the tag, the CHANGELOG and
-install docs land in-tree, and the Phase 2 MCP design doc arrives (facade
-subgraphs, MCW-aligned node taxonomy, failure-mode-aware usage interview).
-Engine is functionally identical to alpha.1.
+Version strings match the tag; CHANGELOG and install docs land in-tree; the
+Phase 2 MCP design doc arrives (facade subgraphs, MCW-aligned node taxonomy,
+failure-mode-aware usage interview). The final tag additionally carries the
+first two Phase 2 slices: the engine tool plane (ToolInvoker, tool.invoke
+nodes, MCP evidence artifacts) and the rmcp client with `graffy mcp add`
+(annotation-seeded roles, skill-fronted facade generation, hermetic
+fixture-server protocol tests). Release targets: Linux x86_64 + aarch64,
+macOS Apple Silicon (Intel Mac dropped by decision — retired runners,
+retiring architecture).
 
 ## v0.1.0-alpha.1 — Phase 1 complete (2026-08-29)
 

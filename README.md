@@ -87,7 +87,7 @@ answers take a bit longer, and why you can actually trust (and audit) what comes
 
 ## Installing (early adopters welcome)
 
-Tagged releases ship a single binary for macOS and Linux (x86_64 + aarch64) — grab one from
+Tagged releases ship a single binary for macOS (Apple Silicon) and Linux (x86_64 + aarch64) — grab one from
 [Releases](https://github.com/rainmana/graffy/releases), `tar -xzf`, put `graffy` on your PATH,
 run `graffy graph list`. Or build from source with nothing but Rust:
 
