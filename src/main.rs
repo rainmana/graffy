@@ -581,10 +581,10 @@ async fn graphify_cmd(
     let Some(mode) = Mode::parse(&mode) else {
         anyhow::bail!("unknown mode '{mode}' — auto | guided | collaborative");
     };
-    if mode != Mode::Auto {
+    if mode == Mode::Collaborative {
         anyhow::bail!(
-            "the {mode:?} involvement mode lands with the TUI conversion flows — \
-             auto-adopt is available today (--mode auto)"
+            "collaborative mode (node-by-node co-design) is the next TUI flow — \
+             auto and guided are available today"
         );
     }
 
@@ -608,6 +608,32 @@ async fn graphify_cmd(
         println!("graphifying prompt '{name}' (auto-adopt)…");
         graphify::graphify_prompt(&name, &raw)?
     };
+
+    let mut spec = spec;
+    if mode == Mode::Guided {
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            match graffy_tui::preview_spec(&spec)? {
+                graffy_tui::PreviewDecision::Reject => {
+                    println!("rejected in review — nothing was registered.");
+                    return Ok(());
+                }
+                graffy_tui::PreviewDecision::Accept => {}
+                graffy_tui::PreviewDecision::AcceptRenamed(name) => {
+                    println!("renamed to '{name}' (id stays stable)");
+                    spec.graph.name = name;
+                }
+            }
+        } else {
+            // Plain-terminal parity: show the exact TOML, ask, EOF rejects.
+            println!("\n===== generated graph (nothing registered yet) =====\n");
+            println!("{}", spec.to_toml_string()?);
+            let answer = ask("register this graph? [y/N] ").await;
+            if !answer.trim().eq_ignore_ascii_case("y") {
+                println!("rejected — nothing was registered.");
+                return Ok(());
+            }
+        }
+    }
 
     let toml_text = spec.to_toml_string()?;
     let store = open_store().await?;

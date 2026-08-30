@@ -8,7 +8,9 @@
 //! journal commits (live via the tap, or read back from disk). If it isn't
 //! in the journal, it isn't on screen.
 
+pub mod preview;
 pub mod state;
 pub mod ui;
 
+pub use preview::{PreviewDecision, preview_spec};
 pub use ui::{run_home, run_live, run_replay};
