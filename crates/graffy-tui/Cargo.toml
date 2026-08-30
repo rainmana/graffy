@@ -11,6 +11,7 @@ authors.workspace = true
 graffy-core.workspace = true
 graffy-proto.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 # crossterm is consumed via ratatui's re-export (one blessed version).
 ratatui.workspace = true
 tokio.workspace = true

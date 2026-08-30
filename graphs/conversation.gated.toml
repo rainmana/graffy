@@ -1,0 +1,88 @@
+# graffy built-in — Gated Conversation.
+# The default conversation floor plus a human release gate: nothing reaches
+# the user until a human approves the verified draft. PauseForDisambiguation
+# in action — the TUI freezes with an approve/reject/edit prompt; the plain
+# CLI asks on stdin (and REJECTS on EOF, so pipes can never rubber-stamp).
+
+[graph]
+id = "graffy.builtin.conversation.gated"
+name = "Gated Conversation"
+version = "0.1.0"
+description = "Conversation floor with a human approval gate before the response is released."
+license = "GPL-3.0-or-later"
+authors = ["graffy built-ins"]
+tags = ["builtin", "conversation", "approval"]
+
+[policy.evidence]
+mode = "strict"
+min_level = "L1"
+
+[policy.budget]
+max_tokens = 200000
+max_usd = 1.0
+max_seconds = 300
+
+[policy.routing]
+ladder = ["fast", "balanced", "frontier"]
+on_quality_fail = "escalate"
+
+[[node]]
+id = "intake"
+kind = "intake"
+description = "Decomposes the user turn into Information Units."
+
+[[node]]
+id = "ground"
+kind = "research"
+description = "Collects evidence artifacts the draft's claims will need."
+
+[[node]]
+id = "draft"
+kind = "model"
+description = "Produces the candidate response from grounded IUs only."
+model_tier = "balanced"
+
+[[node]]
+id = "verify"
+kind = "verify"
+description = "Peer-review gate; failures escalate up the routing ladder."
+model_tier = "balanced"
+
+[[node]]
+id = "release"
+kind = "approval"
+description = "Human release gate: the verified draft waits for a human decision."
+[node.params]
+question = "Release this verified answer to the user?"
+
+[[node]]
+id = "respond"
+kind = "respond"
+description = "Delivers the human-released response."
+
+[[edge]]
+from = "intake"
+to = "ground"
+
+[[edge]]
+from = "ground"
+to = "draft"
+
+[[edge]]
+from = "draft"
+to = "verify"
+
+[[edge]]
+from = "verify"
+to = "release"
+when = "verdict == 'pass'"
+
+[[edge]]
+from = "verify"
+to = "draft"
+when = "verdict == 'revise'"
+
+[[edge]]
+from = "release"
+to = "respond"
+when = "approval == 'approved'"

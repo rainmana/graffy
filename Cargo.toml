@@ -85,6 +85,7 @@ graffy-proto.workspace = true
 graffy-providers.workspace = true
 graffy-tui.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 directories.workspace = true
 # Async runtime at the root from day one (ADR-0001): the Ratatui event loop

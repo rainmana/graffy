@@ -65,7 +65,8 @@ That TOML file *is* a durable graph object — read it, diff it, commit it, send
 | Reasoning templates: sequential thinking, decision framework | ✅ `graphs/` |
 | libSQL store: graph registry, run history, queryable journal mirror (M4) | ✅ `graffy.db` |
 | Graph export/import as validated TOML (M5 core) | ✅ `graffy graph` |
-| Interactive TUI approvals, provenance bundles | 🚧 Phase 1 wrap-up |
+| Interactive approvals: TUI modal + CLI stdin parity, journaled attribution | ✅ gated graph |
+| Provenance bundles, live-provider acceptance (M6) | 🚧 Phase 1 wrap-up |
 | MCP tools-as-nodes, skill → graph conversion | 🔜 Phase 2 |
 | libSQL memory (vectors, temporal KG), MCW detectors live | 🔜 Phase 3 |
 | Benchmarks, surveys, shareable eval bundles | 🔜 Phase 4 |

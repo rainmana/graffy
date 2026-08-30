@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
-use graffy_core::exec::{AutoApprove, Executor, ModelInvoker, OfflineEcho, RunInput};
+use graffy_core::exec::{
+    ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, OfflineEcho, RunInput,
+};
 use graffy_core::journal::{JournalReader, event_kind, summarize, wire};
 use graffy_core::spec::GraphSpec;
 use graffy_memory::{RunRecord, Store};
@@ -254,7 +256,7 @@ async fn run_graph(
                 },
                 &journal_path,
                 invoker.as_ref(),
-                &AutoApprove,
+                &CliApprovalHandler,
             )
             .await?
     };
@@ -482,6 +484,38 @@ async fn doctor() -> anyhow::Result<()> {
         println!("  {key:<20} {}", if set { "set" } else { "-" });
     }
     Ok(())
+}
+
+/// Plain-terminal approval parity (accessibility: every TUI capability has a
+/// non-TUI equivalent). Asks on stdin; empty input / EOF REJECTS, so piped or
+/// headless runs can never rubber-stamp a release gate.
+struct CliApprovalHandler;
+
+#[async_trait::async_trait]
+impl ApprovalHandler for CliApprovalHandler {
+    fn describe(&self) -> &'static str {
+        "human-cli"
+    }
+
+    async fn resolve(&self, node_id: &str, question: &str) -> ApprovalOutcome {
+        println!("\napproval required at node '{node_id}': {question}");
+        println!("  [y]es approve · anything else rejects · 'e <text>' approves with an edit");
+        let line = tokio::task::spawn_blocking(|| {
+            let mut buf = String::new();
+            std::io::stdin().read_line(&mut buf).ok();
+            buf
+        })
+        .await
+        .unwrap_or_default();
+        let line = line.trim();
+        if line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes") {
+            ApprovalOutcome::Approved
+        } else if let Some(edit) = line.strip_prefix("e ") {
+            ApprovalOutcome::Edited(edit.to_owned())
+        } else {
+            ApprovalOutcome::Rejected
+        }
+    }
 }
 
 /// Time-sortable journal file stamp (ULID via graffy-core's id types).

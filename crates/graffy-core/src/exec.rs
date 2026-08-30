@@ -248,6 +248,12 @@ pub enum ApprovalOutcome {
 /// The TUI supplies an interactive handler in M3; tests use [`AutoApprove`].
 #[async_trait::async_trait]
 pub trait ApprovalHandler: Send + Sync {
+    /// Journaled as `ApprovalRecord.decided_by` — say who really decided
+    /// ("auto-approve", "human-tui", "human-cli", …).
+    fn describe(&self) -> &'static str {
+        "handler"
+    }
+
     async fn resolve(&self, node_id: &str, question: &str) -> ApprovalOutcome;
 }
 
@@ -257,6 +263,10 @@ pub struct AutoApprove;
 
 #[async_trait::async_trait]
 impl ApprovalHandler for AutoApprove {
+    fn describe(&self) -> &'static str {
+        "auto-approve"
+    }
+
     async fn resolve(&self, _node_id: &str, _question: &str) -> ApprovalOutcome {
         ApprovalOutcome::Approved
     }
@@ -969,15 +979,21 @@ impl Executor {
                     }))?;
                     let outcome = approvals.resolve(&node.id, &question).await;
                     let (decision, decided_by, note) = match &outcome {
-                        ApprovalOutcome::Approved => {
-                            (wire::ApprovalDecision::Approved, "handler", String::new())
-                        }
-                        ApprovalOutcome::Rejected => {
-                            (wire::ApprovalDecision::Rejected, "handler", String::new())
-                        }
-                        ApprovalOutcome::Edited(edit) => {
-                            (wire::ApprovalDecision::Edited, "handler", edit.clone())
-                        }
+                        ApprovalOutcome::Approved => (
+                            wire::ApprovalDecision::Approved,
+                            approvals.describe(),
+                            String::new(),
+                        ),
+                        ApprovalOutcome::Rejected => (
+                            wire::ApprovalDecision::Rejected,
+                            approvals.describe(),
+                            String::new(),
+                        ),
+                        ApprovalOutcome::Edited(edit) => (
+                            wire::ApprovalDecision::Edited,
+                            approvals.describe(),
+                            edit.clone(),
+                        ),
                     };
                     journal.append(Event::Approval(wire::ApprovalRecord {
                         node_id: node.id.clone(),

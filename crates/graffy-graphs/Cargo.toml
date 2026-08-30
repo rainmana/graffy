@@ -10,5 +10,6 @@ authors.workspace = true
 [dependencies]
 
 [dev-dependencies]
+async-trait.workspace = true
 graffy-core.workspace = true
 tokio.workspace = true
