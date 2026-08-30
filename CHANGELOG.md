@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.0-alpha.3 — the release that ships binaries (2026-08-30)
+
+Supersedes the alpha.2 tag, which was pushed from a clone carrying a stale
+local tag and therefore pointed at a pre-fix tree whose release workflow
+requested a retired runner — no binaries ever attached. Fresh tag name, no
+deletions required anywhere. Contents: everything below (alpha.2 + alpha.1)
+plus graphify v1 — `graffy graphify <SKILL.md|prompt>` compiles skills and
+raw prompts into durable graphs on the verified conversation floor
+(auto-adopt mode; guided/collaborative gate until the TUI flows land).
+Targets: Linux x86_64 + aarch64, macOS Apple Silicon.
+
 ## v0.1.0-alpha.2 — first version-correct release (2026-08-29)
 
 Version strings match the tag; CHANGELOG and install docs land in-tree; the
