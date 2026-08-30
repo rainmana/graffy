@@ -1,0 +1,364 @@
+// graffy — graph-native agentic harness.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// ============================================================================
+//  graffy.mcw.v1 — Meta-Context Window (MCW) Framework as first-class types
+// ============================================================================
+//
+// Canon: "Meta-Context Window (MCW) Framework", W. Alec Akin, Apache-2.0.
+//   https://github.com/rainmana/mcw-framework
+//   https://rainmana.github.io/mcw-framework/
+//   https://huggingface.co/blog/rainmana/the-context-window-between-us
+//
+// These types are the wire-and-journal representation of MCW constructs
+// (ADR-0004). Every graph execution payload that can influence coordination
+// state is expressed in terms of Information Units; every run journal carries
+// failure signals, repair actions, and H/R/D/M observables so coordination
+// health is measurable over time — not vibes.
+//
+// Faithfulness notes:
+//   * The MCW framework is early-stage and explicitly falsifiable. Where it
+//     declines to over-formalize (e.g. IU individuation), these types record
+//     observations without pretending to a solved theory.
+//   * Field comments cite the framework construct they encode. Extensions
+//     beyond canon are marked "graffy extension".
+
+syntax = "proto3";
+
+package graffy.mcw.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// Actors
+// ---------------------------------------------------------------------------
+
+// A participant in coordination. MCW models interaction between one or more
+// Human Context Windows (HCWs) and one or more Artificial Context Windows
+// (ACWs); graffy adds graph-level actors because graphs may inspect and
+// coordinate with other graphs (graffy extension).
+message ActorRef {
+  enum ActorKind {
+    ACTOR_KIND_UNSPECIFIED = 0;
+    // An HCW participant — continuous, situated, advances off-turn.
+    ACTOR_KIND_HUMAN = 1;
+    // A graph node acting with model backing — the only lawful way a model
+    // participates in coordination (no-raw-execution invariant, ADR-0005).
+    ACTOR_KIND_AGENT_NODE = 2;
+    // A model endpoint itself. Present for provenance; never a direct actor.
+    ACTOR_KIND_MODEL = 3;
+    // A tool or MCP server producing evidence.
+    ACTOR_KIND_TOOL = 4;
+    // A whole graph acting as a single actor (graphs inspecting graphs).
+    ACTOR_KIND_GRAPH = 5;
+  }
+
+  string id = 1;
+  ActorKind kind = 2;
+  string display_name = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence — the epistemic floor
+// ---------------------------------------------------------------------------
+
+// Evidence layers, mirroring the MCW Constitution's epistemic floor: no claim
+// may be stated above the evidence layer that supports it, and summaries must
+// preserve falsification conditions. graffy's verify nodes enforce a per-graph
+// minimum level (policy.evidence.min_level in TOML specs).
+enum EvidenceLevel {
+  EVIDENCE_LEVEL_UNSPECIFIED = 0;
+  // Definitional / illustrative — named constructs, examples, hypotheses.
+  EVIDENCE_LEVEL_L0_DEFINITIONAL = 1;
+  // Practitioner observation — anecdote, single-run traces, expert judgment.
+  EVIDENCE_LEVEL_L1_OBSERVATIONAL = 2;
+  // Empirical — piloted measurement with a reproducible artifact attached.
+  EVIDENCE_LEVEL_L2_EMPIRICAL = 3;
+  // Validated — quantitative, replicated, or externally benchmarked.
+  EVIDENCE_LEVEL_L3_VALIDATED = 4;
+}
+
+// What kind of artifact backs a claim. Agents default to never executing on
+// inference alone: statements must be backed by research artifacts. In
+// entertainment contexts (e.g. a DnD campaign) artifacts stay trace-only but
+// MUST still exist and be referenced during execution.
+enum EvidenceKind {
+  EVIDENCE_KIND_UNSPECIFIED = 0;
+  EVIDENCE_KIND_TOOL_RESULT = 1;      // built-in tool output
+  EVIDENCE_KIND_MCP_RESULT = 2;      // result from a connected MCP server
+  EVIDENCE_KIND_WEB_SOURCE = 3;      // fetched/cited external source
+  EVIDENCE_KIND_MEMORY_RECALL = 4;   // retrieval from the libSQL memory store
+  EVIDENCE_KIND_DOCUMENT = 5;        // user- or graph-provided document
+  EVIDENCE_KIND_DATASET = 6;         // structured data (tables, corpora)
+  EVIDENCE_KIND_MODEL_INFERENCE = 7; // model output — lowest-trust kind; can
+                                     // never satisfy a min_level above L0 by
+                                     // itself.
+  EVIDENCE_KIND_HUMAN_INPUT = 8;     // explicit human statement or approval
+  EVIDENCE_KIND_BENCHMARK_RESULT = 9;// output of a graffy eval bundle
+}
+
+// A durable, hash-addressed artifact that claims point at.
+message EvidenceArtifact {
+  string id = 1;                     // ULID, "evd_" prefixed
+  EvidenceKind kind = 2;
+  // Where the artifact lives: file path, URL, memory key, or a
+  // "journal://<run_id>/<seq>" reference into a run journal.
+  string uri = 3;
+  // SHA-256 of the artifact content at collection time (durability check).
+  string content_hash = 4;
+  google.protobuf.Timestamp collected_at = 5;
+  ActorRef producer = 6;             // who/what produced it
+  string run_id = 7;
+  string summary = 8;                // short human-readable description
+  EvidenceLevel level = 9;
+  // Evidence policy: whether this artifact is surfaced in the UI (strict
+  // mode) or recorded but hidden (trace-only mode, e.g. DnD campaigns).
+  bool user_visible = 10;
+}
+
+// ---------------------------------------------------------------------------
+// Information Units — what crosses the boundary
+// ---------------------------------------------------------------------------
+
+// Canon: "An Information Unit is the minimal transferable element of
+// information that can influence coordination state between actors."
+// IUs are substrate-independent but representation-dependent. An IU is not a
+// token, and not necessarily a fact, belief, or sentence.
+enum IuKind {
+  IU_KIND_UNSPECIFIED = 0;
+  IU_KIND_ASSUMPTION = 1;       // a stated (or surfaced) assumption
+  IU_KIND_GOAL = 2;             // an active goal
+  IU_KIND_CONSTRAINT = 3;       // a constraint shaping behavior
+  IU_KIND_CORRECTION = 4;       // a correction to prior shared state
+  IU_KIND_DISTINCTION = 5;      // a distinction on which decisions depend
+  IU_KIND_PRIORITY_CHANGE = 6;  // a change in salience/priority
+  IU_KIND_OTHER = 15;           // IU individuation is an open problem in the
+                                // framework; do not force-fit — record.
+}
+
+// Canon: during communication an IU passes through five stages.
+enum IuStage {
+  IU_STAGE_UNSPECIFIED = 0;
+  IU_STAGE_SELECTION = 1;      // which part of internal state is chosen
+  IU_STAGE_ENCODING = 2;       // compression into a representation
+  IU_STAGE_TRANSMISSION = 3;   // what survives the channel
+  IU_STAGE_DECODING = 4;       // reconstruction using prior context
+  IU_STAGE_INTEGRATION = 5;    // weighting + incorporation into a window
+}
+
+// One observed stage transition for an IU. A conversation can preserve the
+// words while damaging the IU — stage records are where that damage becomes
+// visible and attributable.
+message IuStageRecord {
+  IuStage stage = 1;
+  google.protobuf.Timestamp occurred_at = 2;
+  ActorRef actor = 3;          // who performed this stage
+  // Representation at this stage: "text", "toml-spec", "diagram",
+  // "tool-result", "summary", etc.
+  string representation = 4;
+  // Heuristic 0.0–1.0 estimate of meaning survival at this stage
+  // (graffy extension — feeds Overcompression detection; not a canon metric).
+  double fidelity_estimate = 5;
+  string note = 6;
+}
+
+// The core coordination payload. Node execution payloads carry IUs, the
+// journal records them, compaction graphs must preserve them, and verify
+// nodes check claims against the evidence they cite.
+message InformationUnit {
+  string id = 1;                                // ULID, "iu_" prefixed
+  IuKind kind = 2;
+  // Canonical textual representation of the unit's payload.
+  string payload_text = 3;
+  google.protobuf.Timestamp created_at = 4;
+  ActorRef source = 5;                          // originating actor
+  string session_id = 6;                        // coordination session
+  string run_id = 7;                            // run that recorded it
+  // Five-stage lifecycle trace (Selection → Integration).
+  repeated IuStageRecord stages = 8;
+  // Current salience weight in the shared coordination state (0.0–1.0).
+  // Re-weighting repairs adjust this explicitly.
+  double salience = 9;
+  // Evidence artifacts backing this unit (may be empty for IU kinds that are
+  // inherently human-originated, e.g. goals).
+  repeated string evidence_ids = 10;
+  // Epistemic ceiling: the strongest claim this IU can lawfully support.
+  EvidenceLevel evidence_level = 11;
+  // IUs this unit corrects or replaces (Correction lineage).
+  repeated string supersedes_iu_ids = 12;
+  // If this IU preserves a falsification condition from a compacted bundle,
+  // the id of the compaction that produced it (anti-Overcompression audit).
+  string produced_by_compaction_id = 13;
+  // Free-form annotations (detector hints, template bindings, etc.).
+  map<string, string> attributes = 14;
+}
+
+// ---------------------------------------------------------------------------
+// Failure modes — six ways shared coordination breaks
+// ---------------------------------------------------------------------------
+
+// Canon taxonomy. Detector nodes watch for early signals of each mode and
+// raise FailureSignals into the journal; repair graphs consume them.
+enum FailureMode {
+  FAILURE_MODE_UNSPECIFIED = 0;
+  // Context diverges silently over time ("that isn't what I meant" arrives late).
+  FAILURE_MODE_DRIFT = 1;
+  // One actor's state advances without the change being externalized.
+  FAILURE_MODE_ASYMMETRIC_STATE_ADVANCEMENT = 2;
+  // Shared language hides different interpretations; confidence rises
+  // without verification.
+  FAILURE_MODE_FALSE_ALIGNMENT = 3;
+  // Summarization destroys distinctions needed later. graffy's answer:
+  // compaction is a graph with IU-preservation checks, never a raw summary.
+  FAILURE_MODE_OVERCOMPRESSION = 4;
+  // A hidden variable shapes behavior without becoming legible; repairs
+  // target the wrong cause.
+  FAILURE_MODE_CONSTRAINT_OPACITY = 5;
+  // Clarification, uncertainty, or disagreement is penalized; questions stop
+  // while errors continue.
+  FAILURE_MODE_REPAIR_SUPPRESSION = 6;
+}
+
+// A detected (or human-reported) coordination failure signal.
+message FailureSignal {
+  string id = 1;
+  FailureMode mode = 2;
+  google.protobuf.Timestamp detected_at = 3;
+  ActorRef detector = 4;            // detector node, monitoring graph, or human
+  string session_id = 5;
+  string run_id = 6;
+  // Detector confidence 0.0–1.0. Human reports record 1.0.
+  double confidence = 7;
+  // The observable early signal, in plain language (journaled evidence, not
+  // an inference — link artifacts below).
+  string early_signal = 8;
+  repeated string implicated_iu_ids = 9;
+  repeated string evidence_ids = 10;
+  bool resolved = 11;
+  // RepairAction id that closed this signal, when resolved.
+  string resolved_by_repair_id = 12;
+}
+
+// Per-mode open-signal counts — the "slots" a run or session carries for each
+// of the six failure modes. Cheap to render as a TUI strip and to trend.
+message FailureModeVector {
+  int32 drift = 1;
+  int32 asymmetric_state_advancement = 2;
+  int32 false_alignment = 3;
+  int32 overcompression = 4;
+  int32 constraint_opacity = 5;
+  int32 repair_suppression = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Repair operations — repair as a first-class coordination primitive
+// ---------------------------------------------------------------------------
+
+// Canon: five canonical repair operations. Each is shipped as a built-in
+// graph node kind ("repair.regrounding", "repair.decompression",
+// "repair.reweighting", "repair.disambiguation", "repair.synchronization")
+// so repairs are executed, journaled, and inspectable like everything else.
+enum RepairOperation {
+  REPAIR_OPERATION_UNSPECIFIED = 0;
+  // Reintroduce foundational goals and assumptions.
+  REPAIR_OPERATION_REGROUNDING = 1;
+  // Expand a compressed bundle back into the distinctions it replaced.
+  REPAIR_OPERATION_DECOMPRESSION = 2;
+  // Explicitly change which IUs carry the most salience.
+  REPAIR_OPERATION_REWEIGHTING = 3;
+  // Split an overloaded term/statement into its competing interpretations.
+  REPAIR_OPERATION_DISAMBIGUATION = 4;
+  // Externalize state changes that occurred outside the shared exchange.
+  REPAIR_OPERATION_SYNCHRONIZATION = 5;
+}
+
+// One executed repair, with its observable cost (feeds the R proxy).
+message RepairAction {
+  string id = 1;
+  RepairOperation operation = 2;
+  google.protobuf.Timestamp started_at = 3;
+  google.protobuf.Timestamp completed_at = 4;
+  // FailureSignal that triggered this repair (empty for proactive repairs).
+  string triggered_by_failure_id = 5;
+  ActorRef executor = 6;            // repair node or human
+  string session_id = 7;
+  string run_id = 8;
+  repeated string input_iu_ids = 9;
+  // IUs restored, decompressed, re-weighted, split, or synchronized.
+  repeated string output_iu_ids = 10;
+  // Observable repair cost — inputs to the R (Repair Cost) proxy.
+  uint64 cost_tokens = 11;
+  double cost_seconds = 12;
+  uint32 cost_turns = 13;
+  string summary = 14;
+  bool successful = 15;
+}
+
+// ---------------------------------------------------------------------------
+// H / R / D / M — anchored ordinal observables over time
+// ---------------------------------------------------------------------------
+
+// Canon test-bed proxies:
+//   H — MCW Health: evidence the parties share the current goal, assumptions,
+//       and constraints.
+//   R — Repair Cost: observable effort required to restore coordination.
+//   D — Drift: late-discovered divergence across an interaction window.
+//   M — Misattribution: degree to which a coordination failure is blamed on
+//       actor capability. (Not scored in human↔human baselines.)
+// Scores are anchored ordinals; the anchors live in a versioned rubric so
+// samples are comparable and pre-registration friendly.
+
+enum ScoreSource {
+  SCORE_SOURCE_UNSPECIFIED = 0;
+  SCORE_SOURCE_HEURISTIC = 1;    // rule-based detector inside the harness
+  SCORE_SOURCE_MODEL_JUDGE = 2;  // model-graded (itself a graph, journaled)
+  SCORE_SOURCE_HUMAN_SURVEY = 3; // the in-TUI survey flow
+}
+
+// One H/R/D/M observation.
+message HrdmSample {
+  google.protobuf.Timestamp sampled_at = 1;
+  string session_id = 2;
+  string run_id = 3;
+  // Scope of the observation: "run", "session", "graph:<id>", "window:<n>".
+  string scope = 4;
+  // Anchored ordinal scores; absent = not scored in this sample.
+  optional int32 health = 5;         // H
+  optional int32 repair_cost = 6;    // R
+  optional int32 drift = 7;          // D
+  optional int32 misattribution = 8; // M
+  ScoreSource source = 9;
+  // Version of the anchor rubric these scores were made against.
+  string rubric_version = 10;
+  string rater_id = 11;
+  string note = 12;
+}
+
+// The structural vector of H/R/D/M over time for a session — what the eval
+// dashboards trend and what benchmark bundles export.
+message HrdmSeries {
+  string session_id = 1;
+  repeated HrdmSample samples = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Coordination state snapshots
+// ---------------------------------------------------------------------------
+
+// A durable snapshot of the shared coordination ledger at a point in time.
+// Snapshots make MCW state diffable across compactions: if a distinction
+// present before compaction is missing after, that is Overcompression with
+// receipts.
+message McwStateSnapshot {
+  string id = 1;
+  string session_id = 2;
+  google.protobuf.Timestamp captured_at = 3;
+  // IUs currently active in the shared state, with their salience at capture.
+  repeated string active_iu_ids = 4;
+  FailureModeVector open_failures = 5;
+  repeated string open_failure_ids = 6;
+  // Most recent H/R/D/M sample at capture time, if any.
+  HrdmSample latest_hrdm = 7;
+  // SHA-256 over the canonical serialization of this snapshot's contents.
+  string content_hash = 8;
+}

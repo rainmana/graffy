@@ -1,0 +1,88 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/rainmana/graffy"
+authors = ["W. Alec Akin (@rainmana)"]
+
+[workspace.dependencies]
+# --- internal crates ---
+graffy-proto = { path = "crates/graffy-proto" }
+graffy-core = { path = "crates/graffy-core" }
+graffy-providers = { path = "crates/graffy-providers" }
+graffy-agents = { path = "crates/graffy-agents" }
+graffy-mcw = { path = "crates/graffy-mcw" }
+graffy-memory = { path = "crates/graffy-memory" }
+graffy-graphs = { path = "crates/graffy-graphs" }
+graffy-mcp = { path = "crates/graffy-mcp" }
+graffy-evals = { path = "crates/graffy-evals" }
+graffy-tui = { path = "crates/graffy-tui" }
+
+# --- serialization (ADR-0003) ---
+prost = "0.14"
+prost-types = "0.14"
+prost-build = "0.14"
+protox = "0.9"           # pure-Rust protobuf compiler — no system protoc anywhere
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.1"
+
+# --- ecosystem reuse (ADR-0005) ---
+rig-core = "0.42"        # providers: Anthropic, OpenAI(+compatible), Ollama — MIT
+rigs = "0.0.8"           # multi-agent orchestration on top of rig — MIT
+
+# --- storage (ADR-0006) ---
+libsql = "0.9"           # embedded libSQL with native vector search — MIT
+
+# --- runtime & plumbing ---
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "signal"] }
+petgraph = "0.8"
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.6", features = ["derive"] }
+ulid = "3.0"
+async-trait = "0.1"
+directories = "6.0"
+
+# --- terminal UI (ADR-0002) ---
+ratatui = "0.30"
+crossterm = "0.29"
+
+# --- pinned now, wired in later phases ---
+rmcp = "3.1"             # official Rust MCP SDK — graffy-mcp, Phase 2
+fastembed = "6.0"        # local ONNX embeddings — graffy-memory, Phase 3
+
+# ============================================================================
+# Root package: the single `graffy` binary (CLI + TUI).
+# ============================================================================
+[package]
+name = "graffy"
+description = "Graph-native agentic harness: no prompt or skill ever executes outside an inspectable, durable, shareable agent graph."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+graffy-core.workspace = true
+graffy-proto.workspace = true
+graffy-tui.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+directories.workspace = true
+# Async runtime at the root from day one (ADR-0001): the Ratatui event loop
+# must stay non-blocking while the executor concurrently streams model tokens
+# and processes IUs. Workspace features include `macros` + `rt-multi-thread`.
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

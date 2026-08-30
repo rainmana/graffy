@@ -1,0 +1,16 @@
+[package]
+name = "graffy-proto"
+description = "Generated protobuf types: the MCW core schema (graffy.mcw.v1) and the run journal (graffy.journal.v1)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+prost.workspace = true
+prost-types.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+protox.workspace = true

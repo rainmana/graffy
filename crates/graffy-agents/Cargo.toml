@@ -1,0 +1,11 @@
+[package]
+name = "graffy-agents"
+description = "Multi-agent conversation nodes for graffy graphs, orchestrated via the rigs crate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rigs.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "graffy-tui"
+description = "Terminal-native UI for graffy: live graph execution view, step inspector, and novice-friendly explanations (Ratatui)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "graffy-evals"
+description = "Evaluation runner (Phase 4): industry benchmarks, MCW H/R/D/M over-time reporting, human survey flows, and portable eval bundles."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

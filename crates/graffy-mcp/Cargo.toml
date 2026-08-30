@@ -1,0 +1,10 @@
+[package]
+name = "graffy-mcp"
+description = "MCP integration (Phase 2): rmcp-backed client manager exposing every connected MCP tool as an invocable graph node."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

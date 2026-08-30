@@ -1,0 +1,11 @@
+[package]
+name = "graffy-mcw"
+description = "Meta-Context Window runtime: IU ledger, failure-mode detectors, repair graph templates, and H/R/D/M observables."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+graffy-proto.workspace = true

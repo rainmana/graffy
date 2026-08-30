@@ -1,0 +1,90 @@
+# graffy graph spec v0 — human-readable TOML, git-friendly, shareable (ADR-0003/0007).
+#
+# The DEFAULT CONVERSATION graph: the minimum lawful execution path.
+# Even "plain chat" runs through intake -> ground -> draft -> verify -> respond,
+# which is how graffy enforces its core invariant: no prompt ever executes raw.
+
+[graph]
+id = "graffy.builtin.conversation"
+name = "Default Conversation"
+version = "0.1.0"
+description = "Floor graph enforcing the no-raw-execution invariant for ordinary chat."
+license = "GPL-3.0-or-later"
+authors = ["graffy built-ins"]
+tags = ["builtin", "conversation", "floor"]
+
+[policy.evidence]
+# "strict" surfaces evidence artifacts in the UI; "trace-only" records them
+# but keeps them out of the interface (e.g. a DnD campaign still keeps receipts).
+mode = "strict"
+# Claims below this MCW evidence level cannot pass the verify node.
+min_level = "L1"
+
+[policy.budget]
+max_tokens = 200000
+max_usd = 1.0
+max_seconds = 300
+
+[policy.routing]
+# Capability tiers resolved by the provider registry (rig-backed).
+ladder = ["fast", "balanced", "frontier"]
+# Quality-gate failures escalate up the ladder — never a silent bounce back
+# to the model that produced the rejected content.
+on_quality_fail = "escalate"
+
+[[node]]
+id = "intake"
+kind = "intake"
+description = "Decomposes the user turn into Information Units (assumptions, goals, constraints)."
+
+[[node]]
+id = "ground"
+kind = "research"
+description = "Collects evidence artifacts the draft's claims will need."
+[node.params]
+sources = ["memory.recall", "mcp.*"]
+
+[[node]]
+id = "draft"
+kind = "model"
+description = "Produces the candidate response from grounded IUs only."
+model_tier = "balanced"
+
+[[node]]
+id = "verify"
+kind = "verify"
+description = "Peer-review gate: checks claims against cited evidence, raises MCW failure signals."
+model_tier = "balanced"
+[node.params]
+reject_below_evidence_level = "L1"
+detects = ["overcompression", "false_alignment"]
+
+[[node]]
+id = "respond"
+kind = "respond"
+description = "Delivers the verified response and records IU integration."
+
+[[edge]]
+from = "intake"
+to = "ground"
+
+[[edge]]
+from = "ground"
+to = "draft"
+
+[[edge]]
+from = "draft"
+to = "verify"
+
+[[edge]]
+from = "verify"
+to = "respond"
+when = "verdict == 'pass'"
+
+[[edge]]
+# Guarded back-edge: cycles are lawful only when guarded and budgeted
+# (graph-flow-patterned executor, ADR-0005). Routing policy decides whether
+# the retry escalates to a stronger model.
+from = "verify"
+to = "draft"
+when = "verdict == 'revise'"

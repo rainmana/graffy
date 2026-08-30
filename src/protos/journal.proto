@@ -1,0 +1,201 @@
+// graffy — graph-native agentic harness.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// ============================================================================
+//  graffy.journal.v1 — the append-only run journal
+// ============================================================================
+//
+// Every graph execution writes an ordered stream of RunEvent frames
+// (length-delimited protobuf on disk, mirrored into libSQL for query). The
+// journal is the single source of truth for:
+//   * live TUI rendering (node states, pulses along edges),
+//   * post-hoc inspection and replay (by humans, and by other graphs),
+//   * MCW observability (IUs, failure signals, repairs, H/R/D/M),
+//   * evidence audits (which claim rested on which artifact),
+//   * benchmark bundles (data + the process that produced the data).
+//
+// ADR-0003: protobuf for runtime payloads and the journal; TOML for specs.
+
+syntax = "proto3";
+
+package graffy.journal.v1;
+
+import "google/protobuf/timestamp.proto";
+import "mcw.proto";
+
+// ---------------------------------------------------------------------------
+// Run lifecycle
+// ---------------------------------------------------------------------------
+
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  NODE_STATE_QUEUED = 1;
+  NODE_STATE_RUNNING = 2;
+  NODE_STATE_SUCCEEDED = 3;
+  NODE_STATE_FAILED = 4;
+  NODE_STATE_SKIPPED = 5;
+  NODE_STATE_AWAITING_APPROVAL = 6;
+  NODE_STATE_CANCELLED = 7;
+}
+
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_RUNNING = 1;
+  RUN_STATUS_SUCCEEDED = 2;
+  RUN_STATUS_FAILED = 3;
+  RUN_STATUS_CANCELLED = 4;
+  RUN_STATUS_BUDGET_EXHAUSTED = 5;
+}
+
+// First frame of every journal: what ran, from which spec, under which policy.
+message RunManifest {
+  string run_id = 1;
+  string graph_id = 2;
+  string graph_name = 3;
+  string graph_version = 4;
+  // SHA-256 of the exact TOML spec text that was compiled for this run —
+  // shared graphs are verifiable end to end.
+  string spec_sha256 = 5;
+  string session_id = 6;
+  google.protobuf.Timestamp started_at = 7;
+  // Evidence policy in force ("strict" | "trace-only") and minimum level.
+  string evidence_mode = 8;
+  string evidence_min_level = 9;
+  // Harness version that executed the run.
+  string graffy_version = 10;
+}
+
+message NodeTransition {
+  string node_id = 1;
+  NodeState from = 2;
+  NodeState to = 3;
+  string note = 4;
+}
+
+message RunFinished {
+  RunStatus status = 1;
+  uint64 total_input_tokens = 2;
+  uint64 total_output_tokens = 3;
+  double total_usd = 4;
+  uint64 duration_ms = 5;
+  uint32 failure_signal_count = 6;
+  uint32 repair_count = 7;
+  string summary = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Model, tool, and routing observability
+// ---------------------------------------------------------------------------
+
+// One model invocation, always attributable to a node — never free-floating.
+message ModelCallRecord {
+  string node_id = 1;
+  string provider = 2;          // "anthropic" | "openai" | "ollama" | custom
+  string model = 3;
+  string purpose = 4;           // "draft" | "verify" | "detect" | "repair" | ...
+  uint64 input_tokens = 5;
+  uint64 output_tokens = 6;
+  double cost_usd = 7;
+  uint64 latency_ms = 8;
+  bool streamed = 9;
+  // Hash of the fully rendered request (prompt provenance without storing
+  // secrets in the journal).
+  string request_sha256 = 10;
+}
+
+enum ToolOrigin {
+  TOOL_ORIGIN_UNSPECIFIED = 0;
+  TOOL_ORIGIN_BUILTIN = 1;
+  TOOL_ORIGIN_MCP = 2;
+  TOOL_ORIGIN_SCRIPT = 3;
+}
+
+message ToolCallRecord {
+  string node_id = 1;
+  ToolOrigin origin = 2;
+  string tool_name = 3;         // for MCP: "<server>/<tool>"
+  string args_sha256 = 4;
+  // EvidenceArtifact produced from the result, when one was recorded.
+  string result_evidence_id = 5;
+  uint64 latency_ms = 6;
+  bool success = 7;
+  string error = 8;
+}
+
+// A smart-routing decision: which model a node actually got, and why.
+// Escalation ladders mean quality failures route UP (bigger model, different
+// provider, local fine-tune) instead of bouncing back to the producer.
+message RoutingDecision {
+  string node_id = 1;
+  string requested_tier = 2;    // e.g. "balanced" from the spec
+  string chosen_provider = 3;
+  string chosen_model = 4;
+  // 0 = first choice; each retry/escalation increments.
+  uint32 escalation_level = 5;
+  string reason = 6;            // "policy" | "quality-gate-escalation" | ...
+  repeated string considered = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Human-in-the-loop
+// ---------------------------------------------------------------------------
+
+enum ApprovalDecision {
+  APPROVAL_DECISION_UNSPECIFIED = 0;
+  APPROVAL_DECISION_PENDING = 1;
+  APPROVAL_DECISION_APPROVED = 2;
+  APPROVAL_DECISION_REJECTED = 3;
+  APPROVAL_DECISION_EDITED = 4;  // approved with human modifications
+}
+
+message ApprovalRecord {
+  string node_id = 1;
+  string prompt = 2;             // what the human was asked
+  ApprovalDecision decision = 3;
+  string decided_by = 4;
+  google.protobuf.Timestamp decided_at = 5;
+  string note = 6;
+}
+
+// Budget consumption checkpoint (emitted when thresholds are crossed).
+message BudgetRecord {
+  string scope = 1;              // "run" | "node:<id>" | "session"
+  uint64 tokens_spent = 2;
+  double usd_spent = 3;
+  double seconds_spent = 4;
+  uint64 tokens_limit = 5;
+  double usd_limit = 6;
+  double seconds_limit = 7;
+}
+
+// ---------------------------------------------------------------------------
+// The event stream
+// ---------------------------------------------------------------------------
+
+// One frame in the append-only journal. `seq` is strictly increasing per run;
+// replay = fold(events). MCW payloads are embedded whole so a journal file is
+// a self-contained, portable coordination record.
+message RunEvent {
+  string run_id = 1;
+  uint64 seq = 2;
+  google.protobuf.Timestamp at = 3;
+
+  oneof event {
+    RunManifest run_started = 10;
+    NodeTransition node_transition = 11;
+    ModelCallRecord model_call = 12;
+    ToolCallRecord tool_call = 13;
+    RoutingDecision routing_decision = 14;
+    ApprovalRecord approval = 15;
+    BudgetRecord budget = 16;
+    RunFinished run_finished = 17;
+
+    // MCW observability — first-class, not bolted on (ADR-0004).
+    graffy.mcw.v1.InformationUnit iu_recorded = 20;
+    graffy.mcw.v1.FailureSignal failure_raised = 21;
+    graffy.mcw.v1.RepairAction repair_executed = 22;
+    graffy.mcw.v1.HrdmSample hrdm_sampled = 23;
+    graffy.mcw.v1.EvidenceArtifact evidence_recorded = 24;
+    graffy.mcw.v1.McwStateSnapshot mcw_snapshot = 25;
+  }
+}

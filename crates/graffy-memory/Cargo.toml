@@ -1,0 +1,11 @@
+[package]
+name = "graffy-memory"
+description = "Embedded libSQL storage: verbatim episodic log, native vector search, temporal knowledge graph, layered wake-up, and session persistence."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+libsql.workspace = true

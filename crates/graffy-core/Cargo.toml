@@ -1,0 +1,16 @@
+[package]
+name = "graffy-core"
+description = "Graph model, TOML graph specs, cycle-guard compiler, executor, and run journal for graffy."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+graffy-proto.workspace = true
+petgraph.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+ulid.workspace = true
