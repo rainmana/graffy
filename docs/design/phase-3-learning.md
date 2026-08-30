@@ -30,7 +30,7 @@ at runtime into run journals. **Acted on**: changes execution behavior.
 | Repair op: Re-weighting | ✅ node kind | ⚠️ same | ⬜ | ✅ (ready) |
 | Repair op: Disambiguation | ✅ node kind | ⚠️ same | ✅ `PauseForDisambiguation` + interview follow-ups | ✅ (ready) |
 | Repair op: Synchronization | ✅ node kind | ⚠️ same | ⬜ | ✅ (ready) |
-| H/R/D/M observables | ✅ `HrdmSample` (anchored ordinal scores + rubric version + rater) | ⬜ **needs anchor rubric** (§4) | ⬜ | ✅ sample counts (fold ready) |
+| H/R/D/M observables | ✅ `HrdmSample` (anchored ordinal scores + rubric version + rater) | ⬜ **adaptation drafted, awaiting ratification** (§4) | ⬜ | ✅ sample counts (fold ready) |
 | Evidence levels L0–L3 | ✅ | ✅ every artifact | ✅ strict vs trace-only policy | ✅ distribution |
 | Evidence artifacts (hash-addressed) | ✅ | ✅ | ✅ ground-before-draft floor | ✅ counts |
 | McwStateSnapshot | ✅ | ⬜ | ⬜ | ⬜ |
@@ -38,9 +38,9 @@ at runtime into run journals. **Acted on**: changes execution behavior.
 **Summary for the impatient**: the *observability* layer of MCW is in and
 measured (IUs, six failure modes via judge detection, evidence levels,
 convergence). The *repair* layer is typed and executable but not yet driven
-by detection (that is exactly C2). The *H/R/D/M scoring* layer needs its
-anchor rubric authored by the framework's author — the schema is ready and
-waiting (§4). Detection today is judge-based (one detector); per-mode
+by detection (that is exactly C2). The *H/R/D/M scoring* layer has its
+canonical anchors in the framework repo; graffy's journal adaptation is
+drafted and awaits ratification (§4). Detection today is judge-based (one detector); per-mode
 heuristic detectors are future work that the journal format already supports.
 
 ## 2. What ships the learning loop (C2–C4)
@@ -90,14 +90,18 @@ sample counts; approval outcomes.
    bindings (`GRAFFY_MODEL_*`) — the spec SHA pins the procedure, so model
    is the only variable. Cheap, controlled, publishable.
 
-## 4. HRDM operationalization (needs the framework author)
+## 4. HRDM operationalization (canon exists; adaptation drafted)
 
-`HrdmSample` is deliberately an **anchored ordinal score** (0–4 ints +
+`HrdmSample` is deliberately an **anchored ordinal score** (+
 `rubric_version` + `rater_id` + `source`), not a computed statistic —
 scoring coordination health is a judgment, and pretending otherwise would
-fabricate data. What's missing is the **anchor rubric**: for each of
-H(ealth), R(epair cost), D(rift), M(isattribution), written descriptions of
-what a 0/2/4 looks like, versioned so scores stay comparable.
+fabricate data. The anchors themselves are NOT graffy's to author: the
+framework already carries them (0–3 scales, behavioral anchors for all
+four proxies, rater instructions, inter-rater reliability protocol, and a
+falsification rule) in mcw-framework `docs/experiments/hrdm_rubrics.md`.
+graffy's job is the **rating-substrate mapping** — where in a journal the
+canonical units live — drafted as a declared Article V extension in
+`docs/mcw/hrdm-in-graffy.md` (awaiting the author's ratification).
 
 Collection paths once the rubric exists:
 1. `graffy rate <journal>` — human scores a finished run against the
@@ -130,6 +134,6 @@ arms journaled, `graffy metrics --json` per arm, diff the aggregates.
 
 **graffy (any capable agent, guided by AGENT.md)**: C2/C3/C4 code, rater
 graph, `graffy rate`, bundle export, pricing tables, curves.
-**@rainmana (framework author)**: HRDM anchor rubric v1 (§4), task suites
+**@rainmana (framework author)**: ratify `docs/mcw/hrdm-in-graffy.md` (§4), task suites
 for the benchmark arms (10–30 prompts with pass criteria per domain),
 choice of first target venue/format for the research bundle.
