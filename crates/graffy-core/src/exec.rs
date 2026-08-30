@@ -77,6 +77,38 @@ pub fn node_actor(node_id: &str) -> mcw::ActorRef {
     }
 }
 
+/// Map a judge-named failure mode (lowercase snake, per the verify prompt)
+/// onto the canonical MCW enum. Unknown names map to Unspecified — the
+/// framework's taxonomy is falsifiable, and we never force-fit (C1).
+pub fn failure_mode_from_name(name: &str) -> mcw::FailureMode {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "drift" => mcw::FailureMode::Drift,
+        "asymmetric_state_advancement" => mcw::FailureMode::AsymmetricStateAdvancement,
+        "false_alignment" => mcw::FailureMode::FalseAlignment,
+        "overcompression" => mcw::FailureMode::Overcompression,
+        "constraint_opacity" => mcw::FailureMode::ConstraintOpacity,
+        "repair_suppression" => mcw::FailureMode::RepairSuppression,
+        _ => mcw::FailureMode::Unspecified,
+    }
+}
+
+/// Extract `MODE: <name>` from a judge response, if present.
+pub fn parse_judge_mode(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let upper = line.trim();
+        if let Some(rest) = upper
+            .strip_prefix("MODE:")
+            .or_else(|| upper.strip_prefix("mode:"))
+        {
+            let name = rest.split_whitespace().next().unwrap_or("");
+            if !name.is_empty() {
+                return Some(name.to_owned());
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Guard expressions
 // ---------------------------------------------------------------------------
@@ -797,7 +829,11 @@ impl NodeBehavior for VerifyNode {
 
         let system = "You are a strict peer reviewer inside a graffy graph. Judge the draft \
                       for accuracy, grounding, and completeness. Your reply MUST begin with \
-                      exactly one word: PASS or REVISE, followed by a short reason."
+                      exactly one word: PASS or REVISE, followed by a short reason. If you \
+                      REVISE, add a final line 'MODE: <name>' naming the coordination \
+                      failure that best fits, choosing exactly one of: drift, \
+                      asymmetric_state_advancement, false_alignment, overcompression, \
+                      constraint_opacity, repair_suppression."
             .to_owned();
         let prompt = format!(
             "Minimum evidence level in force: {}.\n\nDRAFT UNDER REVIEW:\n{}",
@@ -843,6 +879,23 @@ impl NodeBehavior for VerifyNode {
                 .insert("verdict".to_owned(), "pass".to_owned());
             Ok(NodeExecutionResult::Continue(out))
         } else {
+            // C1 detector: the judge names the MCW failure mode it observed;
+            // unknown or missing names land honestly as Unspecified.
+            let mode = parse_judge_mode(&response.text)
+                .map(|n| failure_mode_from_name(&n))
+                .unwrap_or(mcw::FailureMode::Unspecified);
+            ctx.records.push(Event::FailureRaised(mcw::FailureSignal {
+                id: crate::id::EvidenceId::generate().to_string(),
+                mode: mode as i32,
+                detected_at: Some(now_ts()),
+                detector: Some(node_actor(&ctx.node.id)),
+                session_id: ctx.session_id.to_owned(),
+                run_id: ctx.run_id.to_owned(),
+                confidence: 0.6,
+                early_signal: response.text.clone(),
+                implicated_iu_ids: vec![draft.id.clone()],
+                ..Default::default()
+            }));
             out.guard_facts
                 .insert("verdict".to_owned(), "revise".to_owned());
             Ok(NodeExecutionResult::Escalate {
@@ -1045,6 +1098,30 @@ impl Executor {
                     to: wire::NodeState::Skipped as i32,
                     note: "visit cap exceeded".to_owned(),
                 }))?;
+                // C1 detector: convergence exhaustion. Not one of the six
+                // canonical modes, so it lands as Unspecified with a legible
+                // signal — never force-fit the taxonomy.
+                journal.append(Event::FailureRaised(mcw::FailureSignal {
+                    id: crate::id::EvidenceId::generate().to_string(),
+                    mode: mcw::FailureMode::Unspecified as i32,
+                    detected_at: Some(now_ts()),
+                    detector: Some(mcw::ActorRef {
+                        id: spec.graph.id.clone(),
+                        kind: mcw::actor_ref::ActorKind::Graph as i32,
+                        display_name: "executor".to_owned(),
+                    }),
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    confidence: 1.0,
+                    early_signal: format!(
+                        "convergence exhaustion: node '{}' hit its visit cap ({}) without \
+                         a passing verdict — repeated repair attempts did not restore \
+                         coordination",
+                        node.id, self.max_node_visits
+                    ),
+                    ..Default::default()
+                }))?;
+                failure_signals += 1;
                 continue;
             }
 
@@ -1394,7 +1471,8 @@ mod tests {
     impl ModelInvoker for AlwaysRevise {
         async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
             let text = if request.purpose == "verify" {
-                "REVISE — deterministic test judge rejects everything".to_owned()
+                "REVISE — deterministic test judge rejects everything\nMODE: false_alignment"
+                    .to_owned()
             } else {
                 format!("draft at tier {}", request.tier)
             };
@@ -1598,6 +1676,48 @@ mod tests {
             )
         });
         assert!(escalated, "revise must bump the routing ladder");
+
+        // C1: the judge-named mode lands as a journaled FailureSignal…
+        let judge_named = events.iter().any(|e| {
+            matches!(
+                &e.event,
+                Some(Event::FailureRaised(f))
+                    if f.mode == mcw::FailureMode::FalseAlignment as i32
+                        && !f.implicated_iu_ids.is_empty()
+            )
+        });
+        assert!(judge_named, "verify must journal the judge-named MCW mode");
+        // …and convergence exhaustion lands honestly as Unspecified.
+        let exhaustion = events.iter().any(|e| {
+            matches!(
+                &e.event,
+                Some(Event::FailureRaised(f))
+                    if f.mode == mcw::FailureMode::Unspecified as i32
+                        && f.early_signal.contains("convergence exhaustion")
+            )
+        });
+        assert!(exhaustion, "visit-cap exhaustion must journal a signal");
         std::fs::remove_file(&journal_path).ok();
+    }
+
+    #[test]
+    fn judge_mode_names_map_canonically_and_never_force_fit() {
+        assert_eq!(
+            failure_mode_from_name("false_alignment"),
+            mcw::FailureMode::FalseAlignment
+        );
+        assert_eq!(
+            failure_mode_from_name("OVERCOMPRESSION"),
+            mcw::FailureMode::Overcompression
+        );
+        assert_eq!(
+            failure_mode_from_name("vibes_were_off"),
+            mcw::FailureMode::Unspecified
+        );
+        assert_eq!(
+            parse_judge_mode("REVISE — weak\nMODE: drift").as_deref(),
+            Some("drift")
+        );
+        assert_eq!(parse_judge_mode("PASS — fine"), None);
     }
 }
