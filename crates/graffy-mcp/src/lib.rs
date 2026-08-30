@@ -24,8 +24,10 @@ use graffy_core::exec::{ToolInvoker, ToolResponse};
 use graffy_core::spec::{EdgeSpec, GraphMeta, GraphSpec, NodeSpec, PolicySpec};
 
 use rmcp::ServiceExt;
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequestParams, GetPromptRequestParams};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
+
+pub mod interview;
 
 /// MCP-plane errors.
 #[derive(Debug, Error)]
@@ -51,10 +53,45 @@ pub struct DiscoveredTool {
     pub schema_json: String,
 }
 
+/// A server-shipped prompt — the author's own usage knowledge.
+#[derive(Debug, Clone)]
+pub struct DiscoveredPrompt {
+    pub name: String,
+    pub description: String,
+    /// Rendered text, when the prompt takes no required arguments.
+    pub content: Option<String>,
+}
+
 /// Discovery snapshot for a server.
 #[derive(Debug, Clone)]
 pub struct Discovery {
     pub tools: Vec<DiscoveredTool>,
+    pub prompts: Vec<DiscoveredPrompt>,
+}
+
+/// Fold server-shipped prompts into prepare-node usage knowledge
+/// (design doc §2: skills front the endpoint). Bounded so a chatty server
+/// cannot flood every facade's system content.
+pub fn usage_knowledge_from_prompts(prompts: &[DiscoveredPrompt]) -> Option<String> {
+    const CAP: usize = 4000;
+    let mut sections = Vec::new();
+    for prompt in prompts {
+        let mut section = format!("## {}\n{}", prompt.name, prompt.description);
+        if let Some(content) = &prompt.content {
+            section.push('\n');
+            section.push_str(content);
+        }
+        sections.push(section);
+    }
+    if sections.is_empty() {
+        return None;
+    }
+    let mut joined = sections.join("\n\n");
+    if joined.chars().count() > CAP {
+        joined = joined.chars().take(CAP).collect::<String>()
+            + "\n… (truncated — full prompts in the server registry)";
+    }
+    Some(joined)
 }
 
 /// A connected stdio MCP server.
@@ -96,7 +133,58 @@ impl LiveServer {
                 schema_json: serde_json::to_string(&*tool.input_schema)?,
             });
         }
-        Ok(Discovery { tools: discovered })
+        let mut prompts = Vec::new();
+        match self.service.list_all_prompts().await {
+            Ok(listed) => {
+                for prompt in listed {
+                    let has_required_args = prompt
+                        .arguments
+                        .as_ref()
+                        .is_some_and(|args| args.iter().any(|a| a.required.unwrap_or(false)));
+                    let mut discovered_prompt = DiscoveredPrompt {
+                        name: prompt.name.clone(),
+                        description: prompt.description.clone().unwrap_or_default(),
+                        content: None,
+                    };
+                    if !has_required_args {
+                        match self
+                            .service
+                            .get_prompt_once(GetPromptRequestParams::new(prompt.name.clone()))
+                            .await
+                        {
+                            Ok(rmcp::model::GetPromptResponse::Complete(result)) => {
+                                let mut parts = Vec::new();
+                                for message in &result.messages {
+                                    if let Some(text) = message.content.as_text() {
+                                        parts.push(text.text.clone());
+                                    }
+                                }
+                                if !parts.is_empty() {
+                                    discovered_prompt.content = Some(parts.join("\n"));
+                                }
+                            }
+                            Ok(other) => {
+                                tracing::debug!(prompt = %prompt.name, ?other, "unsupported prompt response kind");
+                            }
+                            Err(err) => {
+                                tracing::warn!(prompt = %prompt.name, %err, "prompt fetch failed");
+                            }
+                        }
+                    }
+                    prompts.push(discovered_prompt);
+                }
+            }
+            Err(err) => {
+                // Servers without the prompts capability commonly error here;
+                // that is absence of knowledge, not a failure.
+                tracing::debug!(%err, "prompt listing unavailable");
+            }
+        }
+
+        Ok(Discovery {
+            tools: discovered,
+            prompts,
+        })
     }
 
     /// Call a tool; returns (concatenated text, is_error).
@@ -501,6 +589,19 @@ mod tests {
         assert_eq!(echo.destructive, Some(false));
         assert_eq!(seed_role(echo, "effector"), "evidence");
         assert!(echo.schema_json.contains("message"));
+
+        assert_eq!(discovery.prompts.len(), 1, "fixture ships one usage prompt");
+        let usage = &discovery.prompts[0];
+        assert_eq!(usage.name, "usage");
+        let content = usage
+            .content
+            .as_deref()
+            .expect("no-arg prompt content fetched");
+        assert!(content.contains("echo tool expects"));
+        let knowledge =
+            usage_knowledge_from_prompts(&discovery.prompts).expect("knowledge folds from prompts");
+        assert!(knowledge.contains("## usage"));
+        assert!(knowledge.contains("keep messages short"));
 
         let mut args = serde_json::Map::new();
         args.insert(

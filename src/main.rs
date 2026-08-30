@@ -104,6 +104,12 @@ enum McpCommand {
         /// Evidence level granted to this server's results (L0|L1|L2).
         #[arg(long, default_value = "L1")]
         evidence_level: String,
+        /// Usage knowledge to front this server's facades (skips the interview).
+        #[arg(long)]
+        knowledge: Option<String>,
+        /// Skip the usage interview even when the server ships no knowledge.
+        #[arg(long)]
+        skip_interview: bool,
         /// Register the server without generating facade graphs.
         #[arg(long)]
         no_facades: bool,
@@ -176,8 +182,21 @@ async fn main() -> anyhow::Result<()> {
                 stdio,
                 role,
                 evidence_level,
+                knowledge,
+                skip_interview,
                 no_facades,
-            } => mcp_add(name, stdio, role, evidence_level, no_facades).await,
+            } => {
+                mcp_add(
+                    name,
+                    stdio,
+                    role,
+                    evidence_level,
+                    knowledge,
+                    skip_interview,
+                    no_facades,
+                )
+                .await
+            }
             McpCommand::List => mcp_list().await,
         },
         Command::Doctor => doctor().await,
@@ -391,6 +410,8 @@ async fn mcp_add(
     stdio: String,
     role: Option<String>,
     evidence_level: String,
+    knowledge_flag: Option<String>,
+    skip_interview: bool,
     no_facades: bool,
 ) -> anyhow::Result<()> {
     let mut parts = stdio.split_whitespace().map(str::to_owned);
@@ -405,10 +426,9 @@ async fn mcp_add(
     let server = LiveServer::connect_stdio(&command, &args).await?;
     let discovery = server.discover().await?;
 
-    let server_default = role.as_deref().unwrap_or("effector");
     println!("\ndiscovered {} tools:", discovery.tools.len());
     for tool in &discovery.tools {
-        let seeded = graffy_mcp::seed_role(tool, server_default);
+        let seeded = graffy_mcp::seed_role(tool, role.as_deref().unwrap_or("effector"));
         println!(
             "  {:<28} role: {:<9} read_only:{:<12} destructive:{:<12} {}",
             tool.name,
@@ -418,6 +438,51 @@ async fn mcp_add(
             truncate_chars(&tool.description, 44)
         );
     }
+    if !discovery.prompts.is_empty() {
+        println!("\nserver-shipped skills (MCP prompts):");
+        for prompt in &discovery.prompts {
+            println!(
+                "  {:<28} content:{:<4} {}",
+                prompt.name,
+                if prompt.content.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                },
+                truncate_chars(&prompt.description, 52)
+            );
+        }
+    }
+
+    // Usage knowledge, in order of authority: explicit flag > server-shipped
+    // prompts > the interview > nothing (design doc §2/§4).
+    let prompt_knowledge = graffy_mcp::usage_knowledge_from_prompts(&discovery.prompts);
+    let mut usage_knowledge = knowledge_flag
+        .clone()
+        .or(prompt_knowledge)
+        .unwrap_or_default();
+    let mut server_role = role.clone();
+
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let should_interview = server_role.is_none()
+        && knowledge_flag.is_none()
+        && usage_knowledge.is_empty()
+        && !skip_interview
+        && interactive;
+    if should_interview {
+        let (interview_role, interview_knowledge) =
+            run_usage_interview(&name, &discovery.tools).await;
+        if let Some(r) = interview_role {
+            server_role = Some(r.to_owned());
+        }
+        usage_knowledge = interview_knowledge;
+    } else if usage_knowledge.is_empty() && server_role.is_none() {
+        println!(
+            "\n(no usage knowledge: server ships none and the interview was skipped — \
+             facades run on schemas alone; add some later with --knowledge)"
+        );
+    }
+    let server_default = server_role.as_deref().unwrap_or("effector");
 
     let store = open_store().await?;
     let tools_meta: Vec<serde_json::Value> = discovery
@@ -441,15 +506,22 @@ async fn mcp_add(
             role_default: server_default.to_owned(),
             evidence_level: evidence_level.clone(),
             tools_json: serde_json::to_string(&tools_meta)?,
+            usage_knowledge: usage_knowledge.clone(),
             added_at: unix_now_secs(),
         })
         .await?;
 
+    let knowledge_opt = if usage_knowledge.is_empty() {
+        None
+    } else {
+        Some(usage_knowledge.as_str())
+    };
     let mut facades = 0usize;
     if !no_facades {
         for tool in &discovery.tools {
             let seeded = graffy_mcp::seed_role(tool, server_default);
-            let facade = graffy_mcp::generate_facade(&name, tool, seeded, &evidence_level, None);
+            let facade =
+                graffy_mcp::generate_facade(&name, tool, seeded, &evidence_level, knowledge_opt);
             let toml_text = facade.to_toml_string()?;
             store.register_graph(&toml_text, "mcp-facade").await?;
             facades += 1;
@@ -458,12 +530,98 @@ async fn mcp_add(
     server.shutdown().await;
 
     println!("\nregistered server '{name}' with {facades} skill-fronted facade graphs");
+    println!(
+        "usage knowledge: {}",
+        if usage_knowledge.is_empty() {
+            "none".to_owned()
+        } else {
+            format!(
+                "{} chars fronting every prepare node",
+                usage_knowledge.chars().count()
+            )
+        }
+    );
     println!("list them : graffy graph list");
     println!(
         "run one   : graffy run graffy.mcp.{}.<tool> --prompt \"…\" [--offline] [--tui]",
         name
     );
     Ok(())
+}
+
+/// The v1 usage interview (design doc §4/§8): three plain questions on
+/// stdin, judged by the pure logic in graffy_mcp::interview — the False
+/// Alignment guard means a "read-only" claim never overrides a server's own
+/// destructive annotations without an explicit override. Becomes a
+/// first-class graph when the human-input node kind lands.
+async fn run_usage_interview(
+    server: &str,
+    tools: &[graffy_mcp::DiscoveredTool],
+) -> (Option<&'static str>, String) {
+    use graffy_mcp::interview::{
+        ClaimedRole, classify_change_answer, false_alignment, resolve_role,
+    };
+
+    println!("\nquick setup for '{server}' — three questions, Enter to skip any:");
+    let mut knowledge_lines: Vec<String> = Vec::new();
+
+    let q1 = ask("1) What do you usually use this server for? ").await;
+    if !q1.trim().is_empty() {
+        knowledge_lines.push(format!(
+            "Owner's description of intended use: {}",
+            q1.trim()
+        ));
+    }
+
+    let q2 = ask("2) Does it change anything outside your machine, or just look things up? ").await;
+    let mut claimed = classify_change_answer(&q2);
+    if claimed == ClaimedRole::Ambiguous && !q2.trim().is_empty() {
+        // Disambiguation repair, used preventively (§8).
+        let follow = ask(
+            "   Follow-up: does using it modify anything (files, services, messages)? [yes/no] ",
+        )
+        .await;
+        claimed = classify_change_answer(&follow);
+    }
+    let mut override_confirmed = false;
+    let conflict = false_alignment(claimed, tools);
+    if let Some(destructive) = &conflict {
+        println!(
+            "   ⚠ the server itself marks these tools destructive: {} — keeping the safe \
+             default (effector, approval-gated).",
+            destructive.join(", ")
+        );
+        let over =
+            ask("   Type 'override' to trust read-only anyway, Enter to accept the safe default: ")
+                .await;
+        override_confirmed = over.trim().eq_ignore_ascii_case("override");
+    }
+    let role = resolve_role(claimed, conflict.is_some(), override_confirmed);
+
+    let q3 = ask("3) Should graphs reach for it automatically, or only when you ask? ").await;
+    if !q3.trim().is_empty() {
+        knowledge_lines.push(format!("Adoption policy: {}", q3.trim()));
+    }
+
+    let role_out = if q2.trim().is_empty() {
+        None
+    } else {
+        Some(role)
+    };
+    (role_out, knowledge_lines.join("\n"))
+}
+
+async fn ask(prompt: &str) -> String {
+    print!("{prompt}");
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    tokio::task::spawn_blocking(|| {
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf).ok();
+        buf
+    })
+    .await
+    .unwrap_or_default()
 }
 
 async fn mcp_list() -> anyhow::Result<()> {
@@ -474,13 +632,23 @@ async fn mcp_list() -> anyhow::Result<()> {
         return Ok(());
     }
     println!(
-        "{:<16} {:<8} {:<10} {:<6} command",
-        "name", "trans", "role", "level"
+        "{:<16} {:<8} {:<10} {:<6} {:<10} command",
+        "name", "trans", "role", "level", "knowledge"
     );
     for s in servers {
         println!(
-            "{:<16} {:<8} {:<10} {:<6} {} {}",
-            s.name, s.transport, s.role_default, s.evidence_level, s.command, s.args
+            "{:<16} {:<8} {:<10} {:<6} {:<10} {} {}",
+            s.name,
+            s.transport,
+            s.role_default,
+            s.evidence_level,
+            if s.usage_knowledge.is_empty() {
+                "-".to_owned()
+            } else {
+                format!("{}ch", s.usage_knowledge.chars().count())
+            },
+            s.command,
+            s.args
         );
     }
     Ok(())

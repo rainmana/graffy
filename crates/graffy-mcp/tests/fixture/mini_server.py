@@ -34,7 +34,7 @@ def main():
                 "id": mid,
                 "result": {
                     "protocolVersion": requested,
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {}, "prompts": {}},
                     "serverInfo": {"name": "graffy-fixture", "version": "0.1.0"},
                 },
             })
@@ -59,6 +59,37 @@ def main():
                             },
                         }
                     ]
+                },
+            })
+        elif method == "prompts/list":
+            send({
+                "jsonrpc": "2.0",
+                "id": mid,
+                "result": {
+                    "prompts": [
+                        {
+                            "name": "usage",
+                            "description": "How to use this server well.",
+                        }
+                    ]
+                },
+            })
+        elif method == "prompts/get":
+            send({
+                "jsonrpc": "2.0",
+                "id": mid,
+                "result": {
+                    "description": "Fixture usage knowledge.",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": {
+                                "type": "text",
+                                "text": "Fixture usage: the echo tool expects "
+                                        "{\"message\": string}; keep messages short.",
+                            },
+                        }
+                    ],
                 },
             })
         elif method == "tools/call":

@@ -101,10 +101,11 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   role_default   TEXT NOT NULL DEFAULT 'effector',
   evidence_level TEXT NOT NULL DEFAULT 'L1',
   tools_json     TEXT NOT NULL DEFAULT '[]',
+  usage_knowledge TEXT NOT NULL DEFAULT '',
   added_at       INTEGER NOT NULL
 );
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');
-INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '2');
+INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '3');
 "#;
 
 /// An installed graph, as stored.
@@ -157,6 +158,9 @@ pub struct McpServerRecord {
     pub evidence_level: String,
     /// Cached discovery metadata (JSON array of tools).
     pub tools_json: String,
+    /// Usage knowledge fronting every facade's prepare node: server-shipped
+    /// prompts, interview answers, or user-provided text.
+    pub usage_knowledge: String,
     pub added_at: i64,
 }
 
@@ -178,6 +182,18 @@ impl Store {
         let db = libsql::Builder::new_local(path).build().await?;
         let conn = db.connect()?;
         conn.execute_batch(SCHEMA_V1).await?;
+        // v2 -> v3 column-probe migration: CREATE IF NOT EXISTS leaves old
+        // tables untouched, so probe for the column and add it when missing.
+        let probe = conn
+            .query("SELECT usage_knowledge FROM mcp_servers LIMIT 1", ())
+            .await;
+        if probe.is_err() {
+            conn.execute(
+                "ALTER TABLE mcp_servers ADD COLUMN usage_knowledge TEXT NOT NULL DEFAULT ''",
+                (),
+            )
+            .await?;
+        }
         Ok(Self {
             _db: db,
             conn,
@@ -406,8 +422,8 @@ impl Store {
             .execute(
                 "INSERT OR REPLACE INTO mcp_servers
                    (name, transport, command, args, role_default, evidence_level,
-                    tools_json, added_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    tools_json, usage_knowledge, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 libsql::params![
                     server.name.clone(),
                     server.transport.clone(),
@@ -416,6 +432,7 @@ impl Store {
                     server.role_default.clone(),
                     server.evidence_level.clone(),
                     server.tools_json.clone(),
+                    server.usage_knowledge.clone(),
                     server.added_at,
                 ],
             )
@@ -428,7 +445,7 @@ impl Store {
             .conn
             .query(
                 "SELECT name, transport, command, args, role_default, evidence_level,
-                        tools_json, added_at
+                        tools_json, usage_knowledge, added_at
                  FROM mcp_servers ORDER BY name",
                 (),
             )
@@ -443,7 +460,8 @@ impl Store {
                 role_default: row.get::<String>(4)?,
                 evidence_level: row.get::<String>(5)?,
                 tools_json: row.get::<String>(6)?,
-                added_at: row.get::<i64>(7)?,
+                usage_knowledge: row.get::<String>(7)?,
+                added_at: row.get::<i64>(8)?,
             });
         }
         Ok(out)
@@ -585,6 +603,7 @@ mod tests {
                 role_default: "evidence".into(),
                 evidence_level: "L1".into(),
                 tools_json: "[]".into(),
+                usage_knowledge: "fixture knowledge".into(),
                 added_at: 1_700_000_000,
             })
             .await
@@ -594,6 +613,7 @@ mod tests {
         let fetched = store.get_mcp_server("everything").await.unwrap().unwrap();
         assert_eq!(fetched.transport, "stdio");
         assert_eq!(fetched.role_default, "evidence");
+        assert_eq!(fetched.usage_knowledge, "fixture knowledge");
         assert!(store.get_mcp_server("ghost").await.unwrap().is_none());
         std::fs::remove_file(&path).ok();
     }
