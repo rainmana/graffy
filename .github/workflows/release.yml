@@ -1,7 +1,6 @@
-name: Release
-
-# Single-binary distribution for macOS + Linux (ADR-0002).
-# Tag a version (v0.1.0) to build and attach binaries to a GitHub Release.
+# Single-binary distribution (ADR-0002): Linux x86_64 + aarch64 as fully
+# static musl binaries (no glibc floor — runs on any distro), macOS Apple
+# Silicon. Tag a version (v0.1.0-alpha.4) to build and attach binaries.
 
 on:
   push:
@@ -21,9 +20,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
@@ -33,8 +32,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --bin graffy
+        env:
+          CC: ${{ contains(matrix.target, 'musl') && 'musl-gcc' || 'cc' }}
+      - name: Smoke test the built binary
+        run: ./target/${{ matrix.target }}/release/graffy --version
       - name: Package
         run: |
           mkdir -p dist
