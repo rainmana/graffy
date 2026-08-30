@@ -66,4 +66,18 @@ Goal: a stranger can watch a prompt refuse to run raw.
 - Graph registry UX: install/inspect/diff/pin shared graphs; provenance and signing.
 - Novice onboarding polish; docs site.
 
+## Tabled by request (post-Phase-1, recorded so they cannot get lost)
+
+- **Theme engine**: first-class TUI themes — Catppuccin, Dracula, and Nord out of the box,
+  plus user-defined theme files (a `themes/*.toml` format in the same durable spirit as graph
+  specs); optional Unicode / Nerd-Font icon sets with a plain-ASCII fallback that is always
+  available.
+- **Accessibility as a design principle** (neurodivergence-aware and beyond): already in place —
+  no color-only signaling (every node state renders a glyph AND a word), minimal motion, and a
+  plain-language novice strip. Tracked follow-ups: honoring `NO_COLOR`, high-contrast and
+  reduced-motion modes, configurable tick rates, keyboard-only operation audits, predictable
+  layout (no reflow surprises), and plain-output parity for every TUI view so screen readers
+  and pipes get the same information (`replay` without `--tui` already is that parity for
+  inspection).
+
 Out of scope (explicitly, per ADR-0002): GUI/web/Tauri clients. graffy is terminal-native.

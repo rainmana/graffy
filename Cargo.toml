@@ -80,6 +80,7 @@ authors.workspace = true
 [dependencies]
 graffy-core.workspace = true
 graffy-graphs.workspace = true
+graffy-memory.workspace = true
 graffy-proto.workspace = true
 graffy-providers.workspace = true
 graffy-tui.workspace = true

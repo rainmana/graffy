@@ -1,6 +1,6 @@
 [package]
 name = "graffy-memory"
-description = "Embedded libSQL storage: verbatim episodic log, native vector search, temporal knowledge graph, layered wake-up, and session persistence."
+description = "Embedded libSQL storage: graph registry, run history, journal mirror, and session persistence (schema v1)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,4 +8,12 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+graffy-core.workspace = true
+graffy-proto.workspace = true
 libsql.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+graffy-graphs.workspace = true
+tokio.workspace = true

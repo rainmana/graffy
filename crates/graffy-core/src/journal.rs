@@ -96,6 +96,28 @@ impl JournalWriter {
     }
 }
 
+/// Stable, lowercase kind name for an event frame (CLI listings, the
+/// store's queryable mirror, and anything else that needs a discriminator).
+pub fn event_kind(frame: &wire::RunEvent) -> &'static str {
+    match &frame.event {
+        Some(Event::RunStarted(_)) => "run_started",
+        Some(Event::NodeTransition(_)) => "node_transition",
+        Some(Event::ModelCall(_)) => "model_call",
+        Some(Event::ToolCall(_)) => "tool_call",
+        Some(Event::RoutingDecision(_)) => "routing_decision",
+        Some(Event::Approval(_)) => "approval",
+        Some(Event::Budget(_)) => "budget",
+        Some(Event::RunFinished(_)) => "run_finished",
+        Some(Event::IuRecorded(_)) => "iu_recorded",
+        Some(Event::FailureRaised(_)) => "failure_raised",
+        Some(Event::RepairExecuted(_)) => "repair_executed",
+        Some(Event::HrdmSampled(_)) => "hrdm_sampled",
+        Some(Event::EvidenceRecorded(_)) => "evidence_recorded",
+        Some(Event::McwSnapshot(_)) => "mcw_snapshot",
+        None => "empty",
+    }
+}
+
 /// Reads a journal back into memory.
 pub struct JournalReader;
 

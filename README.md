@@ -63,7 +63,9 @@ That TOML file *is* a durable graph object — read it, diff it, commit it, send
 | Providers via rig: Anthropic, OpenAI, Ollama, Venice, OpenRouter (M2) | ✅ tier bindings |
 | Live Ratatui run view + step inspector + novice mode (M3) | ✅ `--tui` |
 | Reasoning templates: sequential thinking, decision framework | ✅ `graphs/` |
-| libSQL persistence + registry (M4), graph export/import (M5) | 🚧 Phase 1 |
+| libSQL store: graph registry, run history, queryable journal mirror (M4) | ✅ `graffy.db` |
+| Graph export/import as validated TOML (M5 core) | ✅ `graffy graph` |
+| Interactive TUI approvals, provenance bundles | 🚧 Phase 1 wrap-up |
 | MCP tools-as-nodes, skill → graph conversion | 🔜 Phase 2 |
 | libSQL memory (vectors, temporal KG), MCW detectors live | 🔜 Phase 3 |
 | Benchmarks, surveys, shareable eval bundles | 🔜 Phase 4 |

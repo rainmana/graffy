@@ -1032,6 +1032,7 @@ dependencies = [
  "directories",
  "graffy-core",
  "graffy-graphs",
+ "graffy-memory",
  "graffy-proto",
  "graffy-providers",
  "graffy-tui",
@@ -1090,7 +1091,13 @@ dependencies = [
 name = "graffy-memory"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "graffy-core",
+ "graffy-graphs",
+ "graffy-proto",
  "libsql",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
