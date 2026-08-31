@@ -49,6 +49,10 @@ pub enum Visibility {
 #[derive(Debug, Clone)]
 pub struct BoundaryTurn {
     pub actor: BoundaryActor,
+    /// The external attempt group whose runs produced this turn — duplicate
+    /// prompts collapse ONLY within one group (P0.1); identical text in two
+    /// real exchanges stays two turns.
+    pub attempt_group_id: String,
     pub role: BoundaryRole,
     /// Verbatim boundary-visible content.
     pub content: String,
@@ -114,6 +118,50 @@ pub struct BoundaryProjection {
 
 pub const BLINDING_PROFILE: &str = "boundary-v1";
 
+/// Order a session's runs by validated manifest timestamps (falling back to
+/// the first event's timestamp), tie-broken deterministically by run id —
+/// NEVER by filename (P0.1: custom journal names cannot reorder a session).
+pub fn order_runs(runs: &mut [Vec<wire::RunEvent>]) {
+    fn key(events: &[wire::RunEvent]) -> (i64, i32, String) {
+        let run_id = events
+            .iter()
+            .find(|e| !e.run_id.is_empty())
+            .map(|e| e.run_id.clone())
+            .unwrap_or_default();
+        let ts = events
+            .iter()
+            .find_map(|e| match &e.event {
+                Some(Event::RunStarted(m)) => m.started_at,
+                _ => None,
+            })
+            .or_else(|| events.iter().find_map(|e| e.at));
+        match ts {
+            Some(t) => (t.seconds, t.nanos, run_id),
+            None => (i64::MAX, i32::MAX, run_id),
+        }
+    }
+    runs.sort_by_key(|events| key(events));
+}
+
+/// The visible boundary conversation as (actor label, verbatim content)
+/// pairs, in order — the hydration payload for session continuation.
+pub fn hydration_from(projection: &BoundaryProjection) -> Vec<(String, String)> {
+    projection
+        .turns
+        .iter()
+        .filter(|t| t.visibility == Visibility::Visible)
+        .map(|t| {
+            (
+                match t.actor {
+                    BoundaryActor::Human => "human".to_owned(),
+                    BoundaryActor::Ai => "ai".to_owned(),
+                },
+                t.content.clone(),
+            )
+        })
+        .collect()
+}
+
 fn is_human(source: &Option<mcw::ActorRef>) -> bool {
     source
         .as_ref()
@@ -135,8 +183,27 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
             .find(|e| !e.run_id.is_empty())
             .map(|e| e.run_id.clone())
             .unwrap_or_default();
+        // Attempt-group identity: from the manifest when present; legacy
+        // journals (pre-P0.1) fall back to the run id, i.e. no cross-run
+        // dedup — the conservative reading.
+        let group = events
+            .iter()
+            .find_map(|e| match &e.event {
+                Some(Event::RunStarted(m)) if !m.attempt_group_id.is_empty() => {
+                    Some(m.attempt_group_id.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| run_id.clone());
+        let kind = events
+            .iter()
+            .find_map(|e| match &e.event {
+                Some(Event::RunStarted(m)) => wire::RunKind::try_from(m.run_kind).ok(),
+                _ => None,
+            })
+            .unwrap_or(wire::RunKind::Unspecified);
         let mut run_succeeded = false;
-        let mut had_retry_feedback = false;
+        let mut had_retry_feedback = kind == wire::RunKind::AutomaticRetry;
         // Candidate turns from this run, applied after we know run status.
         let mut human_candidates: Vec<BoundaryTurn> = Vec::new();
         let mut response_candidate: Option<BoundaryTurn> = None;
@@ -156,6 +223,7 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                     if iu.kind == mcw::IuKind::Goal as i32 && is_human(&iu.source) {
                         human_candidates.push(BoundaryTurn {
                             actor: BoundaryActor::Human,
+                            attempt_group_id: group.clone(),
                             role: BoundaryRole::Prompt,
                             content: iu.payload_text.clone(),
                             at: iu.created_at,
@@ -167,6 +235,7 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                             // A correction the HUMAN externalized.
                             human_candidates.push(BoundaryTurn {
                                 actor: BoundaryActor::Human,
+                                attempt_group_id: group.clone(),
                                 role: BoundaryRole::Correction,
                                 content: iu.payload_text.clone(),
                                 at: iu.created_at,
@@ -181,6 +250,7 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                     } else if role == Some("response") {
                         response_candidate = Some(BoundaryTurn {
                             actor: BoundaryActor::Ai,
+                            attempt_group_id: group.clone(),
                             role: BoundaryRole::VerifiedResponse,
                             content: iu.payload_text.clone(),
                             at: iu.created_at,
@@ -194,6 +264,7 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                     // directions; record the human's contribution.
                     human_candidates.push(BoundaryTurn {
                         actor: BoundaryActor::Human,
+                        attempt_group_id: group.clone(),
                         role: BoundaryRole::ApprovalDecision,
                         content: format!(
                             "[approval:{}] {}",
@@ -223,7 +294,10 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
         // stays ONE boundary turn — later occurrences append refs only.
         for cand in human_candidates {
             if let Some(existing) = p.turns.iter_mut().find(|t| {
-                t.actor == BoundaryActor::Human && t.role == cand.role && t.content == cand.content
+                t.actor == BoundaryActor::Human
+                    && t.role == cand.role
+                    && t.content == cand.content
+                    && t.attempt_group_id == cand.attempt_group_id
             }) {
                 existing.refs.extend(cand.refs);
             } else {
@@ -316,11 +390,16 @@ mod tests {
     }
 
     fn manifest(run: &str) -> Event {
+        manifest_in_group(run, run)
+    }
+
+    fn manifest_in_group(run: &str, group: &str) -> Event {
         Event::RunStarted(wire::RunManifest {
             run_id: run.to_owned(),
             session_id: "ses_T".to_owned(),
             graph_id: "graffy.test".to_owned(),
             graph_name: "SECRET-ARM-B-frontier".to_owned(), // must never leak
+            attempt_group_id: group.to_owned(),
             ..Default::default()
         })
     }
@@ -400,12 +479,12 @@ mod tests {
         // automatic feedback, succeeds. Canonically: ONE human turn (deduped,
         // refs from both attempts), ONE AI turn, ONE exchange.
         let attempt1 = vec![
-            ev("r1", 1, manifest("r1")),
+            ev("r1", 1, manifest_in_group("r1", "g1")),
             ev("r1", 2, human_goal("same prompt")),
             ev("r1", 3, finished(false)),
         ];
         let attempt2 = vec![
-            ev("r2", 1, manifest("r2")),
+            ev("r2", 1, manifest_in_group("r2", "g1")),
             ev("r2", 2, graph_correction("judge critique — internal")),
             ev("r2", 3, human_goal("same prompt")),
             ev("r2", 4, response("verified answer")),
@@ -435,6 +514,24 @@ mod tests {
             p.repair_episodes.is_empty(),
             "automatic retry is NOT an external repair episode"
         );
+    }
+
+    #[test]
+    fn same_text_in_two_real_exchanges_stays_two_turns() {
+        // P0.1 regression: dedup may collapse duplicates only WITHIN one
+        // automatic attempt group. Two REAL exchanges that happen to use
+        // identical text are two distinct human turns.
+        let p = project(&[
+            ok_run("r1", "what time is it?", "noon"),
+            ok_run("r2", "what time is it?", "still noon"),
+        ]);
+        let humans = p
+            .turns
+            .iter()
+            .filter(|t| t.actor == BoundaryActor::Human)
+            .count();
+        assert_eq!(humans, 2, "distinct exchanges must not be merged");
+        assert_eq!(p.exchanges.len(), 2);
     }
 
     #[test]
@@ -481,6 +578,54 @@ mod tests {
         assert_eq!(p.repair_episodes.len(), 1, "one external episode");
         assert!(p.repair_episodes[0].closed_at_exchange.is_some());
         assert_eq!(r_ev(1, p.exchanges.len()), Some(1.0 / 0.3));
+    }
+
+    #[test]
+    fn order_runs_uses_timestamps_never_input_order() {
+        fn stamped(run: &str, secs: i64) -> Vec<wire::RunEvent> {
+            vec![ev(
+                run,
+                1,
+                Event::RunStarted(wire::RunManifest {
+                    run_id: run.to_owned(),
+                    session_id: "ses_T".to_owned(),
+                    started_at: Some(prost_types::Timestamp {
+                        seconds: secs,
+                        nanos: 0,
+                    }),
+                    ..Default::default()
+                }),
+            )]
+        }
+        // Handed over in reverse (as a hostile filename sort would produce).
+        let mut runs = vec![
+            stamped("z-late", 300),
+            stamped("a-mid", 200),
+            stamped("m-early", 100),
+        ];
+        order_runs(&mut runs);
+        let ids: Vec<&str> = runs.iter().map(|r| r[0].run_id.as_str()).collect();
+        assert_eq!(ids, vec!["m-early", "a-mid", "z-late"]);
+        // Deterministic tie-break by run id, never input position.
+        let mut tied = vec![stamped("bbb", 500), stamped("aaa", 500)];
+        order_runs(&mut tied);
+        assert_eq!(tied[0][0].run_id, "aaa");
+    }
+
+    #[test]
+    fn five_dependent_exchanges_project_and_hydrate() {
+        let mut runs = Vec::new();
+        for i in 0..5 {
+            runs.push(ok_run(&format!("r{i}"), &format!("q{i}"), &format!("a{i}")));
+        }
+        let p = project(&runs);
+        assert_eq!(p.exchanges.len(), 5);
+        assert_eq!(p.complete_windows, vec![(0, 4)]);
+        assert_eq!(p.internal.retry_runs, 0);
+        let hydration = hydration_from(&p);
+        assert_eq!(hydration.len(), 10, "5 prompts + 5 responses, in order");
+        assert_eq!(hydration[0], ("human".to_owned(), "q0".to_owned()));
+        assert_eq!(hydration[1], ("ai".to_owned(), "a0".to_owned()));
     }
 
     #[test]

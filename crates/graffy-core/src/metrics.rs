@@ -63,6 +63,12 @@ pub struct RunMetrics {
     pub graffy_version: String,
     /// Coordination session this run belonged to (links retry attempts).
     pub session_id: String,
+    /// External attempt group (one prompt→response attempt group). Legacy
+    /// journals leave it empty; convergence then treats the run as its own
+    /// group (conservative).
+    pub attempt_group_id: String,
+    /// wire::RunKind of this journal (0 for legacy journals).
+    pub run_kind: i32,
     /// Terminal status label (`succeeded`, `failed`, `budget_exhausted`, …);
     /// `unfinished` when the journal has no RunFinished frame.
     pub status: String,
@@ -127,6 +133,8 @@ impl RunMetrics {
                     m.spec_sha256 = man.spec_sha256.clone();
                     m.graffy_version = man.graffy_version.clone();
                     m.session_id = man.session_id.clone();
+                    m.attempt_group_id = man.attempt_group_id.clone();
+                    m.run_kind = man.run_kind;
                 }
                 Event::RunFinished(fin) => {
                     m.status = run_status_label(fin.status);
@@ -214,15 +222,72 @@ pub struct SessionMetrics {
     pub failure_signals: u64,
 }
 
-/// Group per-run rows into session rows, preserving row order (journals
-/// sort chronologically by their ULID-stamped filenames). Rating
+/// Is this row an HRDM rating observation (never an execution run)?
+pub fn is_rating_observation(r: &RunMetrics) -> bool {
+    r.run_kind == wire::RunKind::RatingObservation as i32 || r.graph_id == "graffy.mcw.rating"
+}
+
+/// Convergence view per EXTERNAL ATTEMPT GROUP (P0.1): one prompt→response
+/// attempt group and its automatic retries. Convergence is computed here,
+/// never per whole session — a session of five clean exchanges is five
+/// groups with one attempt each, not one five-attempt struggle.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttemptGroupMetrics {
+    pub attempt_group_id: String,
+    pub session_id: String,
+    pub attempts: u64,
+    /// 1-based attempt index of the first passing run, if any.
+    pub attempts_to_pass: Option<u32>,
+    pub converged: bool,
+    pub repairs: u64,
+    pub repair_cost_tokens: u64,
+}
+
+/// Group execution rows (rating observations excluded) into attempt groups,
+/// preserving row order. Legacy rows without a group id are their own group.
+pub fn attempt_groups_from_rows(rows: &[RunMetrics]) -> Vec<AttemptGroupMetrics> {
+    let mut order: Vec<String> = Vec::new();
+    let mut map: BTreeMap<String, AttemptGroupMetrics> = BTreeMap::new();
+    for r in rows {
+        if is_rating_observation(r) {
+            continue;
+        }
+        let gid = if r.attempt_group_id.is_empty() {
+            r.run_id.clone()
+        } else {
+            r.attempt_group_id.clone()
+        };
+        let entry = map.entry(gid.clone()).or_insert_with(|| {
+            order.push(gid.clone());
+            AttemptGroupMetrics {
+                attempt_group_id: gid.clone(),
+                session_id: r.session_id.clone(),
+                attempts: 0,
+                attempts_to_pass: None,
+                converged: false,
+                repairs: 0,
+                repair_cost_tokens: 0,
+            }
+        });
+        entry.attempts += 1;
+        if r.status == "succeeded" && entry.attempts_to_pass.is_none() {
+            entry.attempts_to_pass = Some(entry.attempts as u32);
+            entry.converged = true;
+        }
+        entry.repairs += r.repairs;
+        entry.repair_cost_tokens += r.repair_cost_tokens;
+    }
+    order.into_iter().filter_map(|k| map.remove(&k)).collect()
+}
+
+/// Group per-run rows into session rows, preserving row order. Rating
 /// pseudo-runs are excluded — a rating observes a session, it is not an
 /// attempt within one.
 pub fn sessions_from_rows(rows: &[RunMetrics]) -> Vec<SessionMetrics> {
     let mut order: Vec<String> = Vec::new();
     let mut map: BTreeMap<String, SessionMetrics> = BTreeMap::new();
     for r in rows {
-        if r.session_id.is_empty() || r.graph_id == "graffy.mcw.rating" {
+        if r.session_id.is_empty() || is_rating_observation(r) {
             continue;
         }
         let entry = map.entry(r.session_id.clone()).or_insert_with(|| {
@@ -316,12 +381,16 @@ pub struct AggregateMetrics {
     /// Runs where some node exhausted its visit cap (convergence exhaustion).
     pub runs_with_cap_hits: u64,
     pub mean_escalations_per_run: f64,
-    /// Session-level convergence (C2): sessions, how many retried, and how
-    /// many of those converged — plus the mean attempts-to-pass among them.
+    /// Distinct coordination sessions among execution rows.
     pub sessions: u64,
-    pub sessions_with_retries: u64,
-    pub sessions_converged_after_retry: u64,
+    /// Convergence per EXTERNAL ATTEMPT GROUP (P0.1) — never per session.
+    pub attempt_groups: u64,
+    pub groups_with_retries: u64,
+    pub groups_converged_after_retry: u64,
     pub mean_attempts_to_converge: Option<f64>,
+    /// HRDM rating observation journals seen (counted separately; they
+    /// contribute samples and NOTHING else).
+    pub rating_observations: u64,
     pub repairs_run_passed: u64,
     /// Run-passed / all repairs (`null` when none ran). NOT causal efficacy.
     pub repair_run_passed_rate: Option<f64>,
@@ -335,12 +404,20 @@ pub struct AggregateMetrics {
 impl AggregateMetrics {
     pub fn from_rows(rows: &[RunMetrics]) -> Self {
         let mut a = AggregateMetrics::default();
+        // P0.1: rating observations are ABOUT sessions — they contribute
+        // their HRDM samples and nothing else to any aggregate.
+        let exec_rows: Vec<&RunMetrics> =
+            rows.iter().filter(|r| !is_rating_observation(r)).collect();
+        for r in rows.iter().filter(|r| is_rating_observation(r)) {
+            a.rating_observations += 1;
+            a.hrdm_samples += r.hrdm_samples;
+        }
         let mut esc_runs = 0u64;
         let mut esc_succeeded = 0u64;
         let mut base_runs = 0u64;
         let mut base_succeeded = 0u64;
         let mut escalations_total = 0u64;
-        for r in rows {
+        for r in exec_rows.iter().copied() {
             a.runs += 1;
             *a.runs_by_status.entry(r.status.clone()).or_default() += 1;
             a.input_tokens += r.input_tokens;
@@ -393,18 +470,22 @@ impl AggregateMetrics {
         };
         let sessions = sessions_from_rows(rows);
         a.sessions = sessions.len() as u64;
+        // P0.1: convergence is a property of one external attempt group —
+        // its automatic retries — NEVER of a whole session of exchanges.
+        let groups = attempt_groups_from_rows(rows);
+        a.attempt_groups = groups.len() as u64;
         let mut attempts_sum = 0u64;
-        for s in &sessions {
-            if s.runs > 1 {
-                a.sessions_with_retries += 1;
-                if let Some(n) = s.attempts_to_pass {
-                    a.sessions_converged_after_retry += 1;
+        for g in &groups {
+            if g.attempts > 1 {
+                a.groups_with_retries += 1;
+                if let Some(n) = g.attempts_to_pass {
+                    a.groups_converged_after_retry += 1;
                     attempts_sum += u64::from(n);
                 }
             }
         }
-        a.mean_attempts_to_converge = (a.sessions_converged_after_retry > 0)
-            .then(|| attempts_sum as f64 / a.sessions_converged_after_retry as f64);
+        a.mean_attempts_to_converge = (a.groups_converged_after_retry > 0)
+            .then(|| attempts_sum as f64 / a.groups_converged_after_retry as f64);
         a.repair_run_passed_rate =
             (a.repairs > 0).then(|| a.repairs_run_passed as f64 / a.repairs as f64);
         a.repair_target_resolution_rate = (a.repairs_resolution_assessed > 0)
@@ -419,6 +500,7 @@ pub struct MetricsReport {
     pub generated_by: String,
     pub runs: Vec<RunMetrics>,
     pub sessions: Vec<SessionMetrics>,
+    pub attempt_groups: Vec<AttemptGroupMetrics>,
     pub aggregate: AggregateMetrics,
 }
 
@@ -557,12 +639,14 @@ mod tests {
     fn sessions_fold_retry_chains_into_convergence_rows() {
         let r1 = RunMetrics {
             session_id: "s1".into(),
+            attempt_group_id: "g1".into(),
             status: "failed".into(),
             failure_signals: 2,
             ..Default::default()
         };
         let r2 = RunMetrics {
             session_id: "s1".into(),
+            attempt_group_id: "g1".into(),
             status: "succeeded".into(),
             repairs: 1,
             repairs_run_passed: 1,
@@ -576,18 +660,31 @@ mod tests {
             status: "succeeded".into(),
             ..Default::default()
         };
-        let sessions = sessions_from_rows(&[r1.clone(), r2.clone(), solo]);
+        let sessions = sessions_from_rows(&[r1.clone(), r2.clone(), solo.clone()]);
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].runs, 2);
-        assert_eq!(sessions[0].attempts_to_pass, Some(2));
-        assert!(sessions[0].converged);
-        assert_eq!(sessions[0].repair_cost_tokens, 40);
 
         let a = AggregateMetrics::from_rows(&[r1, r2]);
         assert_eq!(a.sessions, 1);
-        assert_eq!(a.sessions_with_retries, 1);
-        assert_eq!(a.sessions_converged_after_retry, 1);
+        assert_eq!(a.attempt_groups, 1, "both attempts share one group");
+        assert_eq!(a.groups_with_retries, 1);
+        assert_eq!(a.groups_converged_after_retry, 1);
         assert_eq!(a.mean_attempts_to_converge, Some(2.0));
+
+        // P0.1: five clean exchanges = five one-attempt groups, zero retries
+        // — never a five-attempt struggle.
+        let five: Vec<RunMetrics> = (0..5)
+            .map(|i| RunMetrics {
+                session_id: "s9".into(),
+                attempt_group_id: format!("g{i}"),
+                status: "succeeded".into(),
+                ..Default::default()
+            })
+            .collect();
+        let a5 = AggregateMetrics::from_rows(&five);
+        assert_eq!(a5.attempt_groups, 5);
+        assert_eq!(a5.groups_with_retries, 0);
+        assert_eq!(a5.mean_attempts_to_converge, None);
         assert_eq!(a.repair_run_passed_rate, Some(1.0));
         assert_eq!(a.repair_target_resolution_rate, Some(1.0));
 
@@ -596,6 +693,47 @@ mod tests {
             none.repair_target_resolution_rate, None,
             "unassessed → null, never 0"
         );
+    }
+
+    #[test]
+    fn rating_observations_change_no_execution_aggregate() {
+        // P0.1 regression: HRDM rating pseudo-runs are observations ABOUT a
+        // session, not runs within it. They must not perturb any execution
+        // aggregate while their samples are still counted.
+        let exec_rows = vec![
+            RunMetrics {
+                session_id: "s1".into(),
+                status: "succeeded".into(),
+                input_tokens: 10,
+                ..Default::default()
+            },
+            RunMetrics {
+                session_id: "s1".into(),
+                status: "failed".into(),
+                ..Default::default()
+            },
+        ];
+        let rating = RunMetrics {
+            session_id: "s1".into(),
+            graph_id: "graffy.mcw.rating".into(),
+            status: "succeeded".into(),
+            hrdm_samples: 3,
+            ..Default::default()
+        };
+        let without = AggregateMetrics::from_rows(&exec_rows);
+        let mut with_rating = exec_rows.clone();
+        with_rating.push(rating);
+        let with = AggregateMetrics::from_rows(&with_rating);
+        assert_eq!(with.runs, without.runs, "rating rows are not runs");
+        assert_eq!(with.runs_by_status, without.runs_by_status);
+        assert_eq!(with.input_tokens, without.input_tokens);
+        assert_eq!(with.baseline_success_rate, without.baseline_success_rate);
+        assert_eq!(
+            with.hrdm_samples,
+            without.hrdm_samples + 3,
+            "samples still counted"
+        );
+        assert_eq!(with.rating_observations, 1);
     }
 
     #[test]

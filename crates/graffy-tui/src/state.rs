@@ -542,6 +542,7 @@ mod tests {
                     prompt: "state fold test".into(),
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &path,
                 &OfflineEcho,

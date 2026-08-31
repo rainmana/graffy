@@ -47,6 +47,21 @@ enum RunStatus {
   RUN_STATUS_BUDGET_EXHAUSTED = 5;
 }
 
+// What kind of run this journal records (P0.1): execution attempts are
+// distinguished from external follow-ups and from rating observations so no
+// aggregate ever mixes them.
+enum RunKind {
+  RUN_KIND_UNSPECIFIED = 0;
+  // First attempt of an external prompt→response attempt group.
+  RUN_KIND_INITIAL_ATTEMPT = 1;
+  // Automatic retry within the same attempt group (internal repair sequence).
+  RUN_KIND_AUTOMATIC_RETRY = 2;
+  // A new external exchange continuing an existing session (--session).
+  RUN_KIND_EXTERNAL_FOLLOWUP = 3;
+  // An HRDM rating observation ABOUT a session — never an execution run.
+  RUN_KIND_RATING_OBSERVATION = 4;
+}
+
 // First frame of every journal: what ran, from which spec, under which policy.
 message RunManifest {
   string run_id = 1;
@@ -63,6 +78,15 @@ message RunManifest {
   string evidence_min_level = 9;
   // Harness version that executed the run.
   string graffy_version = 10;
+  // One external prompt→response attempt group (a would-be exchange). All
+  // automatic retries of the same prompt share this id; a new prompt in the
+  // same session gets a new one. Duplicate-prompt dedup is scoped to it.
+  string attempt_group_id = 11;
+  // 1-based attempt number within the attempt group.
+  uint32 attempt_index = 12;
+  // The prior attempt's run id when this run is an automatic retry.
+  string retry_of_run_id = 13;
+  RunKind run_kind = 14;
 }
 
 message NodeTransition {

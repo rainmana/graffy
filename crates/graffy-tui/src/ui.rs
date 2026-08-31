@@ -134,6 +134,7 @@ pub async fn run_live(
                     prompt,
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &path_for_task,
                 invoker.as_ref(),

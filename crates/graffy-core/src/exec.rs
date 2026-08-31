@@ -778,6 +778,26 @@ impl NodeBehavior for ModelNode {
                 iu.payload_text.clone()
             })
             .collect();
+        let history: Vec<String> = ctx
+            .ledger
+            .iter()
+            .filter(|iu| {
+                iu.attributes
+                    .get("role")
+                    .is_some_and(|r| r == "boundary-history")
+            })
+            .map(|iu| {
+                consume(iu);
+                format!(
+                    "{}: {}",
+                    iu.attributes
+                        .get("actor")
+                        .map(String::as_str)
+                        .unwrap_or("?"),
+                    iu.payload_text
+                )
+            })
+            .collect();
 
         let system = ctx.param_str("system").unwrap_or_else(|| {
             "You are a careful drafting node inside a graffy graph. Ground every claim; \
@@ -798,10 +818,16 @@ impl NodeBehavior for ModelNode {
                 }
             }
         }
-        let prompt = if feedback.is_empty() && context_sections.is_empty() {
+        let prompt = if feedback.is_empty() && context_sections.is_empty() && history.is_empty() {
             goal
         } else {
             let mut assembled = goal;
+            if !history.is_empty() {
+                assembled = format!(
+                    "Conversation so far (visible boundary exchanges):\n{}\n\nCurrent request:\n{assembled}",
+                    history.join("\n")
+                );
+            }
             if !context_sections.is_empty() {
                 assembled = format!(
                     "{assembled}\n\nContext from prior steps:\n{}",
@@ -1097,11 +1123,26 @@ impl NodeBehavior for ApprovalNode {
 // ---------------------------------------------------------------------------
 
 /// Input for one run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RunInput {
     pub prompt: String,
     /// Reuse an existing coordination session, or mint one.
     pub session_id: Option<String>,
+    /// P0.1 identity: the external attempt group this run belongs to.
+    /// None mints a fresh group (a new external prompt).
+    pub attempt_group_id: Option<String>,
+    /// 1-based attempt number within the group (0 is treated as 1).
+    pub attempt_index: u32,
+    /// The prior attempt's run id when this is an automatic retry.
+    pub retry_of_run_id: Option<String>,
+    /// Kind of run; Unspecified resolves to InitialAttempt or
+    /// AutomaticRetry (when feedback / retry_of is present).
+    pub run_kind: i32,
+    /// Prior VISIBLE boundary conversation (actor label, verbatim content),
+    /// hydrated when continuing a session so the ACW actually carries the
+    /// exchange history. Journaled as role="boundary-history" IUs — never
+    /// as new boundary turns.
+    pub prior_boundary: Vec<(String, String)>,
     /// C2: repair context from a prior attempt in the same session. Empty
     /// for first attempts. Each item becomes a CORRECTION IU at run start
     /// and a journaled RepairAction (with honest costs) at run end.
@@ -1112,6 +1153,9 @@ pub struct RunInput {
 #[derive(Debug)]
 pub struct RunOutcome {
     pub run_id: String,
+    /// The attempt group this run belonged to (minted or carried) — retry
+    /// loops pass it forward so attempts stay grouped.
+    pub attempt_group_id: String,
     /// The coordination session this run belonged to (minted or reused) —
     /// retry loops carry it forward so attempts stay linked.
     pub session_id: String,
@@ -1180,6 +1224,21 @@ impl Executor {
             .session_id
             .clone()
             .unwrap_or_else(|| SessionId::generate().to_string());
+        let attempt_group_id = input
+            .attempt_group_id
+            .clone()
+            .unwrap_or_else(|| format!("agr_{}", ulid::Ulid::generate()));
+        let attempt_index = input.attempt_index.max(1);
+        let run_kind = match wire::RunKind::try_from(input.run_kind) {
+            Ok(wire::RunKind::Unspecified) | Err(_) => {
+                if !input.feedback.is_empty() || input.retry_of_run_id.is_some() {
+                    wire::RunKind::AutomaticRetry
+                } else {
+                    wire::RunKind::InitialAttempt
+                }
+            }
+            Ok(kind) => kind,
+        };
         let evidence_visible = spec.policy.evidence.mode != "trace-only";
 
         let run_started_at = now_ts();
@@ -1196,6 +1255,10 @@ impl Executor {
             evidence_mode: spec.policy.evidence.mode.clone(),
             evidence_min_level: spec.policy.evidence.min_level.clone(),
             graffy_version: crate::VERSION.to_owned(),
+            attempt_group_id: attempt_group_id.clone(),
+            attempt_index,
+            retry_of_run_id: input.retry_of_run_id.clone().unwrap_or_default(),
+            run_kind: run_kind as i32,
         }))?;
 
         let mut ledger: Vec<mcw::InformationUnit> = Vec::new();
@@ -1237,6 +1300,32 @@ impl Executor {
                 ..Default::default()
             };
             correction_iu_ids.push(iu.id.clone());
+            journal.append(Event::IuRecorded(iu.clone()))?;
+            ledger.push(iu);
+        }
+        // P0.1: session continuation hydrates the prior VISIBLE boundary
+        // conversation into this run's ACW context. History IUs never carry
+        // boundary roles ("prompt"/"response") so the boundary projection
+        // does not double-count them as new turns.
+        for (actor, content) in &input.prior_boundary {
+            let iu = mcw::InformationUnit {
+                id: IuId::generate().to_string(),
+                kind: mcw::IuKind::Other as i32,
+                payload_text: content.clone(),
+                created_at: Some(now_ts()),
+                source: Some(mcw::ActorRef {
+                    id: spec.graph.id.clone(),
+                    kind: mcw::actor_ref::ActorKind::Graph as i32,
+                    display_name: "session-hydration".to_owned(),
+                }),
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                attributes: HashMap::from([
+                    ("role".to_owned(), "boundary-history".to_owned()),
+                    ("actor".to_owned(), actor.clone()),
+                ]),
+                ..Default::default()
+            };
             journal.append(Event::IuRecorded(iu.clone()))?;
             ledger.push(iu);
         }
@@ -1589,6 +1678,7 @@ impl Executor {
 
         Ok(RunOutcome {
             run_id,
+            attempt_group_id,
             session_id,
             status,
             final_text,
@@ -1662,6 +1752,7 @@ mod tests {
                     prompt: "Explain what graffy is in one sentence.".to_owned(),
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &journal_path,
                 &OfflineEcho,
@@ -1812,6 +1903,7 @@ mod tests {
                     prompt: "look something up".to_owned(),
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &journal_path,
                 &OfflineEcho,
@@ -1859,6 +1951,7 @@ mod tests {
                     prompt: "look something up".to_owned(),
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &journal_path,
                 &OfflineEcho,
@@ -1884,6 +1977,7 @@ mod tests {
                     prompt: "unpassable".to_owned(),
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &journal_path,
                 &AlwaysRevise,
@@ -2021,6 +2115,7 @@ when = "verdict == 'pass'"
                     prompt: "claim something".to_owned(),
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &journal_path,
                 &OfflineEcho,
@@ -2050,6 +2145,107 @@ when = "verdict == 'pass'"
         std::fs::remove_file(&journal_path).ok();
     }
 
+    /// P0.1 required test 1: five dependent prompts in one session — a
+    /// later prompt's draft actually SEES the earlier visible responses
+    /// (hydration), sessions link, and each prompt is its own attempt group.
+    #[tokio::test]
+    async fn session_hydration_carries_prior_responses_into_the_acw() {
+        struct CapturingEcho {
+            draft_prompts: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl ModelInvoker for CapturingEcho {
+            async fn complete(&self, request: &ModelRequest) -> Result<ModelResponse, ModelError> {
+                let text = if request.purpose == "verify" {
+                    "PASS — fine".to_owned()
+                } else {
+                    self.draft_prompts
+                        .lock()
+                        .unwrap()
+                        .push(request.prompt.clone());
+                    format!("answer to: {}", request.prompt.lines().last().unwrap_or(""))
+                };
+                Ok(ModelResponse {
+                    provider: "test".to_owned(),
+                    model: "scripted".to_owned(),
+                    text,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cost_usd: 0.0,
+                    latency_ms: 0,
+                })
+            }
+        }
+        let invoker = CapturingEcho {
+            draft_prompts: std::sync::Mutex::new(Vec::new()),
+        };
+        let spec = GraphSpec::from_toml_str(DEFAULT_CONVERSATION).unwrap();
+        let j1 = temp_path("hydrate1");
+        let first = Executor::default()
+            .run(
+                &spec,
+                DEFAULT_CONVERSATION,
+                RunInput {
+                    prompt: "the launch code word is ZEPHYR".to_owned(),
+                    ..Default::default()
+                },
+                &j1,
+                &invoker,
+                &AutoApprove,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status, wire::RunStatus::Succeeded);
+
+        // Hydrate exactly as the CLI does: project run 1, carry the visible
+        // conversation into run 2 (an external follow-up, new attempt group).
+        let events1 = JournalReader::read_all(&j1).unwrap();
+        let projection = crate::boundary::project(std::slice::from_ref(&events1));
+        assert_eq!(projection.exchanges.len(), 1);
+        let hydration = crate::boundary::hydration_from(&projection);
+        let j2 = temp_path("hydrate2");
+        let second = Executor::default()
+            .run(
+                &spec,
+                DEFAULT_CONVERSATION,
+                RunInput {
+                    prompt: "what was the code word again?".to_owned(),
+                    session_id: Some(first.session_id.clone()),
+                    run_kind: wire::RunKind::ExternalFollowup as i32,
+                    prior_boundary: hydration,
+                    ..Default::default()
+                },
+                &j2,
+                &invoker,
+                &AutoApprove,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status, wire::RunStatus::Succeeded);
+        assert_eq!(second.session_id, first.session_id);
+        assert_ne!(
+            second.attempt_group_id, first.attempt_group_id,
+            "a new external prompt is a NEW attempt group"
+        );
+
+        let prompts = invoker.draft_prompts.lock().unwrap();
+        let second_draft = prompts.last().expect("run 2 drafted");
+        assert!(
+            second_draft.contains("ZEPHYR"),
+            "prompt 2's draft must see response/prompt 1 via hydration; got: {second_draft:?}"
+        );
+        assert!(second_draft.contains("Conversation so far"));
+
+        // Projection over both runs: two real exchanges, zero retries — and
+        // hydration IUs did NOT become boundary turns.
+        let events2 = JournalReader::read_all(&j2).unwrap();
+        let both = crate::boundary::project(&[events1, events2]);
+        assert_eq!(both.exchanges.len(), 2);
+        assert_eq!(both.internal.retry_runs, 0);
+        std::fs::remove_file(&j1).ok();
+        std::fs::remove_file(&j2).ok();
+    }
+
     /// Blockers C+D+E: lineage flows into derived claims; no fabricated
     /// stage records; salience is a sourced policy weight, never bare.
     #[tokio::test]
@@ -2064,6 +2260,7 @@ when = "verdict == 'pass'"
                     prompt: "lineage test".to_owned(),
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &journal_path,
                 &OfflineEcho,
@@ -2196,6 +2393,7 @@ when = "verdict == 'pass'"
                     prompt: "retry convergence test".to_owned(),
                     session_id: None,
                     feedback: Vec::new(),
+                    ..Default::default()
                 },
                 &j1,
                 &invoker,
@@ -2234,6 +2432,7 @@ when = "verdict == 'pass'"
                         critique: signal.early_signal.clone(),
                         source_attempt: 1,
                     }],
+                    ..Default::default()
                 },
                 &j2,
                 &invoker,

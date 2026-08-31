@@ -373,11 +373,13 @@ fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
     }
     let aggregate = AggregateMetrics::from_rows(&rows);
     let sessions = graffy_core::metrics::sessions_from_rows(&rows);
+    let attempt_groups = graffy_core::metrics::attempt_groups_from_rows(&rows);
     if json {
         let report = MetricsReport {
             generated_by: format!("graffy {}", env!("CARGO_PKG_VERSION")),
             runs: rows,
             sessions,
+            attempt_groups,
             aggregate,
         };
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -438,15 +440,23 @@ fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
         aggregate.runs_with_cap_hits, aggregate.mean_escalations_per_run
     );
     println!(
-        "  sessions     : {} · {} retried · {} converged after retry (mean attempts {})",
+        "  sessions     : {} · attempt groups {} ({} retried, {} converged after retry, mean attempts {})",
         aggregate.sessions,
-        aggregate.sessions_with_retries,
-        aggregate.sessions_converged_after_retry,
+        aggregate.attempt_groups,
+        aggregate.groups_with_retries,
+        aggregate.groups_converged_after_retry,
         aggregate
             .mean_attempts_to_converge
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "n/a".to_owned())
     );
+    if aggregate.rating_observations > 0 {
+        println!(
+            "  ratings      : {} observation journal(s) — excluded from every execution aggregate",
+            aggregate.rating_observations
+        );
+    }
+    let _ = &attempt_groups;
     println!(
         "  repair fx    : run-passed {} of {} ({}) · target resolved {} of {} assessed ({})",
         aggregate.repairs_run_passed,
@@ -560,6 +570,12 @@ async fn run_graph(
             "--retry is not supported with --tui yet — run plain, then replay any attempt in the TUI"
         );
     }
+    if tui && session.is_some() {
+        anyhow::bail!(
+            "--session is not supported with --tui yet — boundary hydration is CLI-only for now \
+             (rejecting explicitly rather than silently ignoring the flag)"
+        );
+    }
 
     if tui {
         let journal_path =
@@ -580,8 +596,22 @@ async fn run_graph(
         return Ok(());
     }
 
+    let continuing_session = session.is_some();
+    // P0.1: continuing a session hydrates the prior VISIBLE boundary
+    // conversation into the new run's context — otherwise "prompt 2 can
+    // reference response 1" would be false advertising.
+    let prior_boundary: Vec<(String, String)> = match &session {
+        Some(ses) => {
+            let runs = load_session_runs(&runs_dir(), ses);
+            let projection = graffy_core::boundary::project(&runs);
+            graffy_core::boundary::hydration_from(&projection)
+        }
+        None => Vec::new(),
+    };
     let mut session_id: Option<String> = session;
     let mut feedback: Vec<graffy_core::exec::RepairFeedback> = Vec::new();
+    let mut attempt_group: Option<String> = None;
+    let mut prior_run_id: Option<String> = None;
     for attempt in 1..=max_attempts {
         let journal_path = match (&journal, attempt) {
             (Some(path), 1) => path.clone(),
@@ -605,6 +635,21 @@ async fn run_graph(
                     prompt: prompt.clone(),
                     session_id: session_id.clone(),
                     feedback: std::mem::take(&mut feedback),
+                    attempt_group_id: attempt_group.clone(),
+                    attempt_index: attempt,
+                    retry_of_run_id: if attempt > 1 {
+                        prior_run_id.clone()
+                    } else {
+                        None
+                    },
+                    run_kind: if attempt > 1 {
+                        graffy_core::journal::wire::RunKind::AutomaticRetry as i32
+                    } else if continuing_session {
+                        graffy_core::journal::wire::RunKind::ExternalFollowup as i32
+                    } else {
+                        graffy_core::journal::wire::RunKind::InitialAttempt as i32
+                    },
+                    prior_boundary: prior_boundary.clone(),
                 },
                 &journal_path,
                 invoker.as_ref(),
@@ -612,6 +657,8 @@ async fn run_graph(
             )
             .await?;
         session_id = Some(outcome.session_id.clone());
+        attempt_group = Some(outcome.attempt_group_id.clone());
+        prior_run_id = Some(outcome.run_id.clone());
         let succeeded = outcome.status == graffy_proto::journal::v1::RunStatus::Succeeded;
         let harvest_path = outcome.journal_path.clone();
         report_outcome(&spec, &spec_text, outcome).await;
@@ -722,6 +769,43 @@ async fn report_outcome(spec: &GraphSpec, spec_text: &str, outcome: RunOutcome) 
     }
 }
 
+/// Load a session's EXECUTION runs (rating observations excluded), ordered
+/// by validated manifest timestamps with deterministic tie-breaking — never
+/// by filename (P0.1).
+fn load_session_runs(
+    dir: &std::path::Path,
+    session: &str,
+) -> Vec<Vec<graffy_core::journal::wire::RunEvent>> {
+    use graffy_core::journal::wire::run_event::Event as JEvent;
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|ext| ext == "journal"))
+                .collect()
+        })
+        .unwrap_or_default();
+    paths.sort(); // read order only; NOT the session order
+    let mut runs: Vec<Vec<graffy_core::journal::wire::RunEvent>> = Vec::new();
+    for p in &paths {
+        if let Ok(events) = JournalReader::read_all(p) {
+            let manifest = events.iter().find_map(|e| match &e.event {
+                Some(JEvent::RunStarted(m)) => Some(m.clone()),
+                _ => None,
+            });
+            if let Some(m) = manifest
+                && m.session_id == session
+                && m.graph_id != "graffy.mcw.rating"
+                && m.run_kind != graffy_core::journal::wire::RunKind::RatingObservation as i32
+            {
+                runs.push(events);
+            }
+        }
+    }
+    graffy_core::boundary::order_runs(&mut runs);
+    runs
+}
+
 /// Canonical rubric pin (immutable: framework commit + rubric content hash)
 /// plus the adaptation identifier, per §6 of the conformance review. The
 /// `-draft` suffix drops only after the section-8 gates pass AND the
@@ -817,32 +901,7 @@ fn cmd_rate(
     use std::io::BufRead;
 
     let dir = dir.unwrap_or_else(runs_dir);
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|ext| ext == "journal"))
-                .collect()
-        })
-        .unwrap_or_default();
-    paths.sort();
-    let mut runs_events: Vec<Vec<graffy_core::journal::wire::RunEvent>> = Vec::new();
-    for p in &paths {
-        if let Ok(events) = JournalReader::read_all(p) {
-            let manifest = events.iter().find_map(|e| match &e.event {
-                Some(graffy_core::journal::wire::run_event::Event::RunStarted(m)) => {
-                    Some((m.session_id.clone(), m.graph_id.clone()))
-                }
-                _ => None,
-            });
-            if let Some((ses, graph_id)) = manifest
-                && ses == session
-                && graph_id != "graffy.mcw.rating"
-            {
-                runs_events.push(events);
-            }
-        }
-    }
+    let runs_events = load_session_runs(&dir, &session);
     if runs_events.is_empty() {
         anyhow::bail!(
             "no runs found for session '{session}' in {} — every run prints its session id",
@@ -1088,6 +1147,10 @@ fn cmd_rate(
         evidence_mode: "strict".to_owned(),
         evidence_min_level: String::new(),
         graffy_version: env!("CARGO_PKG_VERSION").to_owned(),
+        attempt_group_id: pseudo_run.clone(),
+        attempt_index: 1,
+        retry_of_run_id: String::new(),
+        run_kind: wire::RunKind::RatingObservation as i32,
     }))?;
     let count = samples.len();
     for s in samples {
