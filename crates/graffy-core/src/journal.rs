@@ -114,6 +114,8 @@ pub fn event_kind(frame: &wire::RunEvent) -> &'static str {
         Some(Event::HrdmSampled(_)) => "hrdm_sampled",
         Some(Event::EvidenceRecorded(_)) => "evidence_recorded",
         Some(Event::McwSnapshot(_)) => "mcw_snapshot",
+        Some(Event::BoundaryEvent(_)) => "boundary_event",
+        Some(Event::Segmentation(_)) => "segmentation",
         None => "empty",
     }
 }

@@ -363,6 +363,7 @@ impl AppState {
             Some(Event::McwSnapshot(_)) => {
                 self.feed(seq, "MCW state snapshot captured".to_owned());
             }
+            Some(Event::BoundaryEvent(_)) | Some(Event::Segmentation(_)) => {}
             None => {}
         }
     }

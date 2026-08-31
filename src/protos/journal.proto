@@ -193,6 +193,37 @@ message BudgetRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Boundary and rating audit records (P0.2)
+// ---------------------------------------------------------------------------
+
+// An explicit, ordered record of content CROSSING the HCW/ACW boundary,
+// journaled at the moment it crosses — the auditable transcript, not a
+// reconstruction. Pending approvals are NOT human turns; only the resolved
+// human decision emits one.
+message BoundaryEventRecord {
+  string actor = 1;              // "human" | "ai"
+  // "prompt" | "correction" | "approval_question" | "approval_decision" |
+  // "verified_response"
+  string role = 2;
+  string content = 3;            // verbatim boundary-visible content
+  string visibility = 4;         // "visible" | "unknown"
+  string attempt_group_id = 5;
+  // journal://<run_id>/<seq> of the underlying event carrying this content.
+  string source_ref = 6;
+}
+
+// Segmentation audit for rating sessions: the FROZEN mechanical proposal and
+// the rater's structured decision, persisted for every proposed unit — even
+// when nothing is scored. Corrections never overwrite the proposal.
+message SegmentationRecord {
+  string unit_id = 1;
+  string proposal = 2;
+  string proposal_sha256 = 3;
+  string decision = 4;           // "frozen" | "accepted" | "excluded" | "adjusted"
+  string correction = 5;         // structured human correction ("" if none)
+}
+
+// ---------------------------------------------------------------------------
 // The event stream
 // ---------------------------------------------------------------------------
 
@@ -221,5 +252,9 @@ message RunEvent {
     graffy.mcw.v1.HrdmSample hrdm_sampled = 23;
     graffy.mcw.v1.EvidenceArtifact evidence_recorded = 24;
     graffy.mcw.v1.McwStateSnapshot mcw_snapshot = 25;
+
+    // P0.2 audit records.
+    BoundaryEventRecord boundary_event = 26;
+    SegmentationRecord segmentation = 27;
   }
 }

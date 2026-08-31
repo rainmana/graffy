@@ -31,7 +31,9 @@ pub enum BoundaryRole {
     Prompt,
     /// A human correction/clarification captured at intake (source = human).
     Correction,
-    /// A human approval decision (approve / reject / edit) on a gate.
+    /// An AI approval/clarification question shown to the human.
+    ApprovalQuestion,
+    /// A human approval decision (approve / edit) on a gate.
     ApprovalDecision,
     /// The verified response actually shown to the human.
     VerifiedResponse,
@@ -69,6 +71,9 @@ pub struct BoundaryTurn {
 pub struct Exchange {
     pub human_turn: usize,
     pub ai_turn: usize,
+    /// Which party initiated this exchange (canonical exchanges run in both
+    /// directions: Human→AI and AI→Human, e.g. approval question → decision).
+    pub initiated_by: BoundaryActor,
 }
 
 /// A candidate EXTERNAL repair episode: opens at a human repair-initiating
@@ -207,6 +212,9 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
         // Candidate turns from this run, applied after we know run status.
         let mut human_candidates: Vec<BoundaryTurn> = Vec::new();
         let mut response_candidate: Option<BoundaryTurn> = None;
+        // P0.2: explicit journaled boundary events — when present they ARE
+        // the transcript, and reconstruction is skipped for this run.
+        let mut explicit_turns: Vec<BoundaryTurn> = Vec::new();
 
         for frame in events {
             match &frame.event {
@@ -280,6 +288,39 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                         visibility: Visibility::Visible,
                     });
                 }
+                Some(Event::BoundaryEvent(b)) => {
+                    explicit_turns.push(BoundaryTurn {
+                        actor: if b.actor == "human" {
+                            BoundaryActor::Human
+                        } else {
+                            BoundaryActor::Ai
+                        },
+                        attempt_group_id: if b.attempt_group_id.is_empty() {
+                            group.clone()
+                        } else {
+                            b.attempt_group_id.clone()
+                        },
+                        role: match b.role.as_str() {
+                            "prompt" => BoundaryRole::Prompt,
+                            "correction" => BoundaryRole::Correction,
+                            "approval_question" => BoundaryRole::ApprovalQuestion,
+                            "approval_decision" => BoundaryRole::ApprovalDecision,
+                            _ => BoundaryRole::VerifiedResponse,
+                        },
+                        content: b.content.clone(),
+                        at: frame.at,
+                        refs: vec![if b.source_ref.is_empty() {
+                            format!("journal://{}/{}", frame.run_id, frame.seq)
+                        } else {
+                            b.source_ref.clone()
+                        }],
+                        visibility: if b.visibility == "visible" {
+                            Visibility::Visible
+                        } else {
+                            Visibility::Unknown
+                        },
+                    });
+                }
                 Some(Event::FailureRaised(_)) => p.internal.failure_signals += 1,
                 Some(Event::RepairExecuted(_)) => p.internal.repair_actions += 1,
                 _ => {}
@@ -290,6 +331,31 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
             p.internal.retry_runs += 1;
         }
 
+        if !explicit_turns.is_empty() {
+            // Explicit path: the journal already says what crossed. Dedup is
+            // still scoped to the attempt group (retries re-emit the prompt).
+            for cand in explicit_turns {
+                if cand.actor == BoundaryActor::Human
+                    && let Some(existing) = p.turns.iter_mut().find(|t| {
+                        t.actor == BoundaryActor::Human
+                            && t.role == cand.role
+                            && t.content == cand.content
+                            && t.attempt_group_id == cand.attempt_group_id
+                    })
+                {
+                    existing.refs.extend(cand.refs);
+                } else {
+                    p.turns.push(cand);
+                }
+            }
+            if had_retry_feedback {
+                p.internal.retry_runs += 1;
+            }
+            if !run_succeeded {
+                p.internal.runs_without_verified_response += 1;
+            }
+            continue;
+        }
         // Dedup: the same human content re-entering across automatic attempts
         // stays ONE boundary turn — later occurrences append refs only.
         for cand in human_candidates {
@@ -313,20 +379,25 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
         }
     }
 
-    // Exchanges: each AI turn closes an exchange with the nearest preceding
-    // unpaired human turn (canonical adjacent pair).
-    let mut unpaired_human: Option<usize> = None;
+    // Exchanges: canonical ADJACENT pairs, one turn from each party — in
+    // either direction (Human→AI prompt/response, AI→Human question/decision).
+    let mut pending: Option<usize> = None;
     for (idx, turn) in p.turns.iter().enumerate() {
-        match turn.actor {
-            BoundaryActor::Human => unpaired_human = Some(idx),
-            BoundaryActor::Ai => {
-                if let Some(h) = unpaired_human.take() {
-                    p.exchanges.push(Exchange {
-                        human_turn: h,
-                        ai_turn: idx,
-                    });
-                }
+        match pending {
+            Some(prev) if p.turns[prev].actor != turn.actor => {
+                let (h, a) = if p.turns[prev].actor == BoundaryActor::Human {
+                    (prev, idx)
+                } else {
+                    (idx, prev)
+                };
+                p.exchanges.push(Exchange {
+                    human_turn: h,
+                    ai_turn: a,
+                    initiated_by: p.turns[prev].actor,
+                });
+                pending = None;
             }
+            _ => pending = Some(idx),
         }
     }
 
@@ -342,22 +413,14 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
     // itself another correction (v1 closure proxy — the rater confirms).
     for (idx, turn) in p.turns.iter().enumerate() {
         if turn.actor == BoundaryActor::Human && turn.role == BoundaryRole::Correction {
-            let closed = p
-                .exchanges
-                .iter()
-                .position(|ex| {
-                    ex.human_turn > idx && p.turns[ex.human_turn].role != BoundaryRole::Correction
-                })
-                .or_else(|| {
-                    // The correction itself opens an exchange that completes
-                    // and is followed by no further correction: closed there.
-                    p.exchanges.iter().position(|ex| {
-                        ex.human_turn == idx
-                            && !p.turns[ex.ai_turn + 1..]
-                                .iter()
-                                .any(|t| t.role == BoundaryRole::Correction)
-                    })
-                });
+            // Closure requires evidence of PROCEEDING: a later completed
+            // exchange whose human turn is not itself a correction. A
+            // session ending at/after the correction leaves the episode
+            // OPEN (right-censored) — absence of another correction is not
+            // closure (P0.2).
+            let closed = p.exchanges.iter().position(|ex| {
+                ex.human_turn > idx && p.turns[ex.human_turn].role != BoundaryRole::Correction
+            });
             p.repair_episodes.push(RepairEpisode {
                 initiating_turn: idx,
                 closed_at_exchange: closed,
@@ -626,6 +689,107 @@ mod tests {
         assert_eq!(hydration.len(), 10, "5 prompts + 5 responses, in order");
         assert_eq!(hydration[0], ("human".to_owned(), "q0".to_owned()));
         assert_eq!(hydration[1], ("ai".to_owned(), "a0".to_owned()));
+    }
+
+    #[test]
+    fn episode_at_session_end_is_right_censored_not_closed() {
+        // P0.2 regression: closure requires evidence of PROCEEDING (a later
+        // completed non-correction exchange). A correction at session end has
+        // no such evidence — the episode stays open/right-censored. Absence
+        // of another correction is not closure.
+        let correction_run = vec![
+            ev("rc", 1, manifest("rc")),
+            ev("rc", 2, human_correction("no — the OTHER config")),
+            ev("rc", 3, response("fixed")),
+            ev("rc", 4, finished(true)),
+        ];
+        let p = project(&[ok_run("r0", "q0", "a0"), correction_run]);
+        assert_eq!(p.repair_episodes.len(), 1);
+        assert_eq!(
+            p.repair_episodes[0].closed_at_exchange, None,
+            "session ends at the correction exchange — right-censored, not closed"
+        );
+    }
+
+    fn explicit_event(
+        run: &str,
+        seq: u64,
+        actor: &str,
+        role: &str,
+        content: &str,
+        group: &str,
+    ) -> wire::RunEvent {
+        ev(
+            run,
+            seq,
+            Event::BoundaryEvent(wire::BoundaryEventRecord {
+                actor: actor.to_owned(),
+                role: role.to_owned(),
+                content: content.to_owned(),
+                visibility: "visible".to_owned(),
+                attempt_group_id: group.to_owned(),
+                source_ref: format!("journal://{run}/{seq}"),
+            }),
+        )
+    }
+
+    #[test]
+    fn explicit_boundary_events_are_preferred_and_pair_both_directions() {
+        // A run whose journal carries explicit events: prompt, AI approval
+        // question, human decision, verified response. Reconstruction must
+        // NOT run (the goal IU below would otherwise duplicate the prompt),
+        // and pairing must produce BOTH a Human→AI and an AI→Human exchange.
+        let run = vec![
+            ev("rx", 1, manifest_in_group("rx", "g1")),
+            ev("rx", 2, human_goal("deploy the fix")),
+            explicit_event("rx", 3, "human", "prompt", "deploy the fix", "g1"),
+            explicit_event("rx", 4, "ai", "approval_question", "Deploy to prod?", "g1"),
+            explicit_event("rx", 5, "human", "approval_decision", "[approved]", "g1"),
+            explicit_event("rx", 6, "ai", "verified_response", "deployed", "g1"),
+            ev("rx", 7, finished(true)),
+        ];
+        let p = project(&[run]);
+        assert_eq!(
+            p.turns.len(),
+            4,
+            "explicit transcript, no reconstruction duplicates"
+        );
+        // Canonical adjacent non-overlapping pairs: (prompt↔question) and
+        // (decision↔response) — both Human-initiated in this sequence.
+        assert_eq!(p.exchanges.len(), 2);
+        assert_eq!(p.exchanges[0].initiated_by, BoundaryActor::Human);
+        assert_eq!(
+            p.turns[p.exchanges[0].ai_turn].role,
+            BoundaryRole::ApprovalQuestion,
+            "the AI question pairs as the response slot of exchange 1"
+        );
+        // A session OPENING with an AI clarification is an AI→Human exchange.
+        let ai_first = vec![
+            ev("ry", 1, manifest_in_group("ry", "g2")),
+            explicit_event("ry", 2, "ai", "approval_question", "Which env?", "g2"),
+            explicit_event(
+                "ry",
+                3,
+                "human",
+                "approval_decision",
+                "[edited] staging",
+                "g2",
+            ),
+            ev("ry", 4, finished(true)),
+        ];
+        let p2 = project(&[ai_first]);
+        assert_eq!(p2.exchanges.len(), 1);
+        assert_eq!(
+            p2.exchanges[0].initiated_by,
+            BoundaryActor::Ai,
+            "AI question → human decision is an AI-initiated exchange"
+        );
+        assert!(
+            p.turns
+                .iter()
+                .all(|t| !t.refs.is_empty() && t.refs[0].starts_with("journal://")),
+            "every explicit turn carries its source reference"
+        );
     }
 
     #[test]

@@ -1345,6 +1345,10 @@ impl Executor {
         let mut repairs = 0u32;
         let mut artifact_levels: HashMap<String, i32> = HashMap::new();
         let mut modes_raised: HashSet<i32> = HashSet::new();
+        // P0.2: the response IU's journal ref, held until the run's status
+        // is known — the boundary event is emitted only when the response
+        // was actually SHOWN (run succeeded).
+        let mut pending_response: Option<(String, String)> = None;
         let mut final_text: Option<String> = None;
         let mut notes: Vec<String> = Vec::new();
         let mut forced_status: Option<wire::RunStatus> = None;
@@ -1508,6 +1512,14 @@ impl Executor {
                         decided_at: None,
                         note: String::new(),
                     }))?;
+                    journal.append(Event::BoundaryEvent(wire::BoundaryEventRecord {
+                        actor: "ai".to_owned(),
+                        role: "approval_question".to_owned(),
+                        content: question.clone(),
+                        visibility: "visible".to_owned(),
+                        attempt_group_id: attempt_group_id.clone(),
+                        source_ref: String::new(),
+                    }))?;
                     let outcome = approvals.resolve(&node.id, &question).await;
                     let (decision, decided_by, note) = match &outcome {
                         ApprovalOutcome::Approved => (
@@ -1534,6 +1546,27 @@ impl Executor {
                         decided_at: Some(now_ts()),
                         note,
                     }))?;
+                    // The RESOLVED decision is the human's boundary turn.
+                    // (Pending emitted none; EOF-rejects are silence, and
+                    // silence never registers — so only affirmative
+                    // decisions become human turns.)
+                    if matches!(
+                        outcome,
+                        ApprovalOutcome::Approved | ApprovalOutcome::Edited(_)
+                    ) {
+                        let content = match &outcome {
+                            ApprovalOutcome::Edited(edit) => format!("[edited] {edit}"),
+                            _ => "[approved]".to_owned(),
+                        };
+                        journal.append(Event::BoundaryEvent(wire::BoundaryEventRecord {
+                            actor: "human".to_owned(),
+                            role: "approval_decision".to_owned(),
+                            content,
+                            visibility: "visible".to_owned(),
+                            attempt_group_id: attempt_group_id.clone(),
+                            source_ref: String::new(),
+                        }))?;
+                    }
                     if outcome == ApprovalOutcome::Rejected {
                         journal.append(Event::NodeTransition(wire::NodeTransition {
                             node_id: node.id.clone(),
@@ -1558,7 +1591,32 @@ impl Executor {
                 journal.append(Event::EvidenceRecorded(artifact.clone()))?;
             }
             for iu in &output.ius {
-                journal.append(Event::IuRecorded(iu.clone()))?;
+                let seq = journal.append(Event::IuRecorded(iu.clone()))?;
+                let human_src = iu
+                    .source
+                    .as_ref()
+                    .is_some_and(|a| a.kind == mcw::actor_ref::ActorKind::Human as i32);
+                if human_src
+                    && (iu.kind == mcw::IuKind::Goal as i32
+                        || iu.kind == mcw::IuKind::Correction as i32)
+                {
+                    journal.append(Event::BoundaryEvent(wire::BoundaryEventRecord {
+                        actor: "human".to_owned(),
+                        role: if iu.kind == mcw::IuKind::Goal as i32 {
+                            "prompt".to_owned()
+                        } else {
+                            "correction".to_owned()
+                        },
+                        content: iu.payload_text.clone(),
+                        visibility: "visible".to_owned(),
+                        attempt_group_id: attempt_group_id.clone(),
+                        source_ref: format!("journal://{run_id}/{seq}"),
+                    }))?;
+                }
+                if iu.attributes.get("role").is_some_and(|r| r == "response") {
+                    pending_response =
+                        Some((format!("journal://{run_id}/{seq}"), iu.payload_text.clone()));
+                }
             }
             if node.kind == "respond"
                 && let Some(text) = &output.text
@@ -1620,6 +1678,20 @@ impl Executor {
         } else {
             wire::RunStatus::Failed
         });
+        // P0.2: the verified response crossed the boundary only if the run
+        // succeeded (it was shown); failed attempts emit no AI turn.
+        if status == wire::RunStatus::Succeeded
+            && let Some((source_ref, content)) = pending_response.take()
+        {
+            journal.append(Event::BoundaryEvent(wire::BoundaryEventRecord {
+                actor: "ai".to_owned(),
+                role: "verified_response".to_owned(),
+                content,
+                visibility: "visible".to_owned(),
+                attempt_group_id: attempt_group_id.clone(),
+                source_ref,
+            }))?;
+        }
         // C2: this run WAS the repair attempt for any carried feedback —
         // journal the RepairAction with observed costs and the honest
         // outcome. Hard-error exits above deliberately emit none: retry
@@ -1703,6 +1775,7 @@ mod tests {
     use crate::spec::GraphSpec;
 
     const DEFAULT_CONVERSATION: &str = include_str!("../../../graphs/conversation.default.toml");
+    const GATED_CONVERSATION: &str = include_str!("../../../graphs/conversation.gated.toml");
 
     fn temp_path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("graffy-exec-test-{tag}-{}", ulid::Ulid::generate()))
@@ -2142,6 +2215,73 @@ when = "verdict == 'pass'"
         );
         // The offline echo judge always passes — so a failed run with the
         // floor reason proves the structural gate fired BEFORE any judge.
+        std::fs::remove_file(&journal_path).ok();
+    }
+
+    /// P0.2: the AI's approval question and the human's resolved decision
+    /// are ordered boundary turns; the PENDING approval record is not one.
+    #[tokio::test]
+    async fn approval_question_and_decision_are_ordered_boundary_turns() {
+        let spec = GraphSpec::from_toml_str(GATED_CONVERSATION).unwrap();
+        let journal_path = temp_path("approval-boundary");
+        let outcome = Executor::default()
+            .run(
+                &spec,
+                GATED_CONVERSATION,
+                RunInput {
+                    prompt: "gated question".to_owned(),
+                    ..Default::default()
+                },
+                &journal_path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await
+            .expect("gated run completes");
+        assert_eq!(outcome.status, wire::RunStatus::Succeeded);
+        let events = JournalReader::read_all(&journal_path).unwrap();
+        let boundary: Vec<(String, String)> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Some(Event::BoundaryEvent(b)) => Some((b.actor.clone(), b.role.clone())),
+                _ => None,
+            })
+            .collect();
+        let q = boundary
+            .iter()
+            .position(|(a, r)| a == "ai" && r == "approval_question")
+            .expect("AI question is a boundary turn");
+        let d = boundary
+            .iter()
+            .position(|(a, r)| a == "human" && r == "approval_decision")
+            .expect("human decision is a boundary turn");
+        assert!(q < d, "question precedes decision");
+        let pending_count = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    &e.event,
+                    Some(Event::Approval(a))
+                        if a.decision == wire::ApprovalDecision::Pending as i32
+                )
+            })
+            .count();
+        assert_eq!(pending_count, 1, "pending record exists");
+        let human_turns = boundary.iter().filter(|(a, _)| a == "human").count();
+        assert_eq!(
+            human_turns, 2,
+            "prompt + resolved decision only — pending is NOT a human turn"
+        );
+        // The projection pairs all four boundary turns into two canonical
+        // adjacent exchanges (prompt↔question, decision↔response).
+        let p = crate::boundary::project(std::slice::from_ref(&events));
+        assert_eq!(p.exchanges.len(), 2, "both boundary adjacencies pair");
+        assert!(
+            p.turns
+                .iter()
+                .any(|t| t.role == crate::boundary::BoundaryRole::ApprovalQuestion),
+            "the AI question is a first-class boundary turn"
+        );
         std::fs::remove_file(&journal_path).ok();
     }
 

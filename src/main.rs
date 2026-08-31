@@ -812,31 +812,19 @@ fn load_session_runs(
 /// framework author explicitly ratifies that exact version.
 const HRDM_RUBRIC_VERSION: &str = "mcw-hrdm@8365d220+sha256.87ed2be6 + graffy-journal-map@v1-draft";
 const HRDM_ADAPTATION_VERSION: &str = "graffy-journal-map@v1-draft";
-const HRDM_SEGMENTATION_VERSION: &str = "boundary-projection@v1";
+const HRDM_SEGMENTATION_VERSION: &str = "boundary-projection@v2";
 
-// Canonical anchors, quoted from the pinned mcw-framework
-// docs/experiments/hrdm_rubrics.md (displayed in full during rating — the
-// framework page remains the source of truth).
-const H_ANCHORS: &str = "H — MCW Health (0-3), per five-exchange window:\n\
-  H3 strong   — no misalignment surfaces; references to earlier content used correctly; at most one trivial clarification, resolved within a single exchange.\n\
-  H2 adequate — minor misalignment surfaces but is repaired within the window in <= 2 dedicated repair turns; no completed work discarded or redone.\n\
-  H1 strained — at least one misalignment forces rework or discarding of a work product, OR the same IU requires >= 2 clarification attempts without convergence.\n\
-  H0 broken   — the parties demonstrably pursue different goals or referents; a work product is rejected wholesale; or the interaction is abandoned or reset.";
-const R_ANCHORS: &str = "R — Repair Cost (0-3), per EXTERNAL repair episode:\n\
-  R0 low  — realignment within <= 1 dedicated repair turn; no work discarded.\n\
-  R1      — realignment within 2 dedicated repair turns, or minor rework.\n\
-  R2      — 3-5 dedicated repair turns, or a work product substantially redone.\n\
-  R3 high — > 5 dedicated repair turns, a full restart/reset, or repair abandoned with the misalignment left standing.";
-const D_ANCHORS: &str = "D — Drift Rate (0-3), per window, via LATE DISCOVERIES (misalignments surfacing >= 3 completed exchanges after the turn that introduced them; both ends need citations):\n\
-  D0 stable — no late discoveries; misalignment surfaces within 2 exchanges of introduction.\n\
-  D1        — exactly one late discovery in the window.\n\
-  D2        — two late discoveries, or one whose introducing turn lies more than 10 exchanges back.\n\
-  D3 rapid  — three or more late discoveries, or end-of-window goal statements materially disagree.";
-const M_ANCHORS: &str = "M — Misattribution (0-3), per window, Human-AI only. A COMPLETE transcript with NO capability-blame statements is M0. Reserve unratable for an INCOMPLETE record or unverifiable capability-vs-context evidence — absence of blame is not a reason to mark unratable, and never infer untyped human thoughts:\n\
-  M0 none     — no capability-blame statements; failures attributed to information not exchanged.\n\
-  M1          — capability blame expressed once but withdrawn or corrected during repair.\n\
-  M2          — blame recurs (>= 2 statements) without verification, or capability-flavored corrective action while the needed IU was never externalized.\n\
-  M3 frequent — the interaction strategy reorganizes around presumed incapability while the transcript shows the needed IU was never sent.";
+/// The pinned anchor tables, quoted VERBATIM from the canonical rubric file
+/// (commit 8365d220, sha256 87ed2be6). Rendered in full — never paraphrased.
+const PINNED_ANCHORS: &str = include_str!("../docs/mcw/hrdm-anchors-pinned.md");
+
+/// Extract one proxy's verbatim section from the pinned anchors document.
+fn pinned_section(marker: &str) -> &'static str {
+    let start = PINNED_ANCHORS.find(marker).unwrap_or(0);
+    let rest = &PINNED_ANCHORS[start..];
+    let end = rest[3..].find("\n## ").map(|i| i + 3).unwrap_or(rest.len());
+    &rest[..end]
+}
 
 enum ScoreAnswer {
     Score(i32),
@@ -868,7 +856,7 @@ fn ask_score(lines: &mut dyn Iterator<Item = std::io::Result<String>>, label: &s
     }
 }
 
-/// Read one free-text line (empty allowed); None = abort.
+/// Read one free-text line; None = abort (EOF or explicit 'q').
 fn ask_line(
     lines: &mut dyn Iterator<Item = std::io::Result<String>>,
     label: &str,
@@ -876,7 +864,25 @@ fn ask_line(
     println!("{label}");
     match lines.next() {
         None | Some(Err(_)) => None,
-        Some(Ok(line)) => Some(line.trim().to_owned()),
+        Some(Ok(line)) => {
+            let t = line.trim().to_owned();
+            if t == "q" || t == "Q" { None } else { Some(t) }
+        }
+    }
+}
+
+/// Read a REQUIRED nonempty line (unratable reasons, citations); loops until
+/// nonempty; None = abort.
+fn ask_required(
+    lines: &mut dyn Iterator<Item = std::io::Result<String>>,
+    label: &str,
+) -> Option<String> {
+    loop {
+        let answer = ask_line(lines, label)?;
+        if !answer.is_empty() {
+            return Some(answer);
+        }
+        println!("  a nonempty answer is required (or 'q' to abort)");
     }
 }
 
@@ -885,12 +891,25 @@ fn rating_aborted() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse turn indices ("2,7") into their journal refs.
+fn refs_for_indices(
+    projection: &graffy_core::boundary::BoundaryProjection,
+    input: &str,
+) -> Option<Vec<String>> {
+    let mut refs = Vec::new();
+    for part in input.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let idx: usize = part.parse().ok()?;
+        refs.extend(projection.turns.get(idx)?.refs.iter().cloned());
+    }
+    if refs.is_empty() { None } else { Some(refs) }
+}
+
 /// `graffy rate <session>` — human H/R/D/M sampling over the EXTERNAL
-/// boundary transcript (docs/mcw/hrdm-in-graffy.md). graffy reconstructs the
-/// conversation the human and AI actually had, proposes canonical units, and
-/// separates internal orchestration into telemetry that is never rated. The
-/// anchored judgments are the human's; every score carries citations,
-/// provenance, immutable pins, and calibration status.
+/// boundary transcript (docs/mcw/hrdm-in-graffy.md). The mechanical proposal
+/// is FROZEN and persisted; the rater's structured decisions (accept /
+/// exclude / adjust) are persisted separately for every unit — even when
+/// nothing is scored — and the corrected segmentation is what gets scored.
+/// Aborting at ANY prompt writes nothing.
 fn cmd_rate(
     session: String,
     dir: Option<PathBuf>,
@@ -921,14 +940,18 @@ fn cmd_rate(
         blinding_profile, HRDM_ADAPTATION_VERSION
     );
     println!("STATUS: calibration-only — this adaptation is DRAFT (not ratified).\n");
-    println!(
-        "internal orchestration telemetry (NOT canonical H/R/D/M): {} runs · {} retry-carrying · {} failure signals · {} repair actions · {} without a verified response",
-        projection.internal.runs,
-        projection.internal.retry_runs,
-        projection.internal.failure_signals,
-        projection.internal.repair_actions,
-        projection.internal.runs_without_verified_response
-    );
+    if blinded {
+        println!("(blinded: internal retry/failure/repair telemetry suppressed)");
+    } else {
+        println!(
+            "internal orchestration telemetry (NOT canonical H/R/D/M): {} runs · {} retry-carrying · {} failure signals · {} repair actions · {} without a verified response",
+            projection.internal.runs,
+            projection.internal.retry_runs,
+            projection.internal.failure_signals,
+            projection.internal.repair_actions,
+            projection.internal.runs_without_verified_response
+        );
+    }
     println!("\nboundary transcript ({} turns):", projection.turns.len());
     for (i, t) in projection.turns.iter().enumerate() {
         let actor = match t.actor {
@@ -940,31 +963,48 @@ fn cmd_rate(
             println!("      {line}");
         }
     }
-    println!(
-        "\nproposed segmentation: {} completed exchanges · {} complete window(s) · {} trailing exchange(s) NOT scored · {} candidate external repair episode(s)",
+
+    // FROZEN mechanical proposal (persisted verbatim + hashed).
+    let mut episode_lines: Vec<String> = Vec::new();
+    for (ei, ep) in projection.repair_episodes.iter().enumerate() {
+        episode_lines.push(format!(
+            "episode {} — initiating turn {} — {}",
+            ei + 1,
+            ep.initiating_turn,
+            match ep.closed_at_exchange {
+                Some(x) => format!("closed at exchange {}", x + 1),
+                None => "OPEN (right-censored at session end)".to_owned(),
+            }
+        ));
+    }
+    let proposal_summary = format!(
+        "turns {} · exchanges {} · complete windows {:?} · trailing {} · {}",
+        projection.turns.len(),
         projection.exchanges.len(),
-        projection.complete_windows.len(),
+        projection.complete_windows,
         projection.trailing_exchanges,
-        projection.repair_episodes.len()
+        if episode_lines.is_empty() {
+            "no episodes proposed".to_owned()
+        } else {
+            episode_lines.join(" | ")
+        }
     );
+    let proposal_hash = graffy_core::exec::sha256_hex(proposal_summary.as_bytes());
+    println!("\nproposed segmentation (frozen): {proposal_summary}");
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
-    let Some(seg_answer) = ask_line(
-        &mut lines,
-        "accept the proposed segmentation? [enter = yes / type a correction note — corrections are kept as audit trail, the mechanical proposal is preserved]:",
-    ) else {
-        return rating_aborted();
-    };
-    let seg_note = if seg_answer.is_empty() {
-        "segmentation: accepted as proposed".to_owned()
-    } else {
-        format!("segmentation correction (audit): {seg_answer}")
-    };
-
     let rater_id = rater
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "human".to_owned());
+
+    let mut seg_records: Vec<wire::SegmentationRecord> = vec![wire::SegmentationRecord {
+        unit_id: "projection".to_owned(),
+        proposal: proposal_summary.clone(),
+        proposal_sha256: proposal_hash.clone(),
+        decision: "frozen".to_owned(),
+        correction: String::new(),
+    }];
     let mut samples: Vec<graffy_proto::mcw::v1::HrdmSample> = Vec::new();
     let base_sample = |unit_id: String, refs: Vec<String>| graffy_proto::mcw::v1::HrdmSample {
         sampled_at: Some(graffy_core::exec::now_ts()),
@@ -978,7 +1018,7 @@ fn cmd_rate(
         source: graffy_proto::mcw::v1::ScoreSource::HumanRater as i32,
         rubric_version: HRDM_RUBRIC_VERSION.to_owned(),
         rater_id: rater_id.clone(),
-        note: seg_note.clone(),
+        note: String::new(),
         unit_id,
         evidence_refs: refs,
         adaptation_version: HRDM_ADAPTATION_VERSION.to_owned(),
@@ -991,144 +1031,228 @@ fn cmd_rate(
     if projection.complete_windows.is_empty() {
         println!(
             "\nno complete five-exchange windows: this session is NOT eligible for canonical H/D/M \
-             (a retry session is one attempted exchange, not five — see adaptation §1.3). \
-             Build exchanges with:  graffy run <graph> --prompt \"...\" --session {session}"
+             (see adaptation §1.3). Build exchanges with:  graffy run <graph> --prompt \"...\" --session {session}"
         );
     }
 
+    // Per-proxy scoring helper: (score, refs, reason) with citations
+    // required whenever the anchor depends on observed events (score > 0).
+    macro_rules! score_proxy {
+        ($letter:expr, $marker:expr, $default_refs:expr, $cite_label:expr, $needs_cite:expr) => {{
+            println!("\n{}", pinned_section($marker));
+            match ask_score(&mut lines, concat!("score ", $letter)) {
+                ScoreAnswer::Abort => return rating_aborted(),
+                ScoreAnswer::Unratable => {
+                    let Some(reason) = ask_required(
+                        &mut lines,
+                        concat!("  unratable reason for ", $letter, " (required):"),
+                    ) else {
+                        return rating_aborted();
+                    };
+                    (None, Vec::new(), Some(reason))
+                }
+                ScoreAnswer::Score(v) => {
+                    #[allow(clippy::redundant_closure_call)]
+                    let needs = ($needs_cite)(v);
+                    let refs: Vec<String> = if needs {
+                        loop {
+                            let Some(cited) = ask_required(&mut lines, $cite_label) else {
+                                return rating_aborted();
+                            };
+                            if let Some(refs) = refs_for_indices(&projection, &cited) {
+                                break refs;
+                            }
+                            println!("  enter valid turn indices like: 0,3");
+                        }
+                    } else {
+                        $default_refs
+                    };
+                    (Some(v), refs, None)
+                }
+            }
+        }};
+    }
+
     for (wi, (ws, we)) in projection.complete_windows.iter().enumerate() {
-        println!(
-            "\n===== window {} (exchanges {}-{}) =====",
-            wi + 1,
-            ws + 1,
-            we + 1
-        );
-        let mut refs: Vec<String> = Vec::new();
+        let unit = format!("window:{}", wi + 1);
+        let bounds = format!("exchanges {}-{}", ws + 1, we + 1);
+        println!("\n===== {unit} ({bounds}) =====");
+        let mut window_refs: Vec<String> = Vec::new();
         for ex in &projection.exchanges[*ws..=*we] {
             for idx in [ex.human_turn, ex.ai_turn] {
-                let t = &projection.turns[idx];
-                refs.extend(t.refs.iter().cloned());
-                println!(
-                    "  [{idx}] {} {:?}: {}",
-                    if t.actor == BoundaryActor::Human {
-                        "HUMAN"
-                    } else {
-                        "AI"
-                    },
-                    t.role,
-                    t.content.lines().next().unwrap_or("")
-                );
+                window_refs.extend(projection.turns[idx].refs.iter().cloned());
             }
         }
-        let mut reasons: Vec<String> = Vec::new();
-        println!("\n{H_ANCHORS}");
-        let h = match ask_score(&mut lines, "score H") {
-            ScoreAnswer::Abort => return rating_aborted(),
-            ScoreAnswer::Unratable => {
-                let Some(r) = ask_line(&mut lines, "  unratable reason for H (required):") else {
-                    return rating_aborted();
-                };
-                reasons.push(format!("H: {r}"));
-                None
-            }
-            ScoreAnswer::Score(v) => Some(v),
+        let Some(decision) = ask_line(
+            &mut lines,
+            "score this window? [enter = accept / x = exclude]:",
+        ) else {
+            return rating_aborted();
         };
-        println!("\n{D_ANCHORS}");
-        let d = match ask_score(&mut lines, "score D") {
-            ScoreAnswer::Abort => return rating_aborted(),
-            ScoreAnswer::Unratable => {
-                let Some(r) = ask_line(&mut lines, "  unratable reason for D (required):") else {
-                    return rating_aborted();
-                };
-                reasons.push(format!("D: {r}"));
-                None
+        if decision.eq_ignore_ascii_case("x") {
+            let Some(why) = ask_required(&mut lines, "  exclusion note (required):") else {
+                return rating_aborted();
+            };
+            seg_records.push(wire::SegmentationRecord {
+                unit_id: unit,
+                proposal: bounds,
+                proposal_sha256: proposal_hash.clone(),
+                decision: "excluded".to_owned(),
+                correction: why,
+            });
+            continue;
+        }
+        seg_records.push(wire::SegmentationRecord {
+            unit_id: unit.clone(),
+            proposal: bounds,
+            proposal_sha256: proposal_hash.clone(),
+            decision: "accepted".to_owned(),
+            correction: String::new(),
+        });
+
+        let (h, h_refs, h_reason) = score_proxy!(
+            "H",
+            "## H — MCW Health",
+            window_refs.clone(),
+            "  cite the turn indices evidencing the misalignment/rework (e.g. 0,3):",
+            |v: i32| v < 3
+        );
+        let (d, d_refs, d_reason) = score_proxy!(
+            "D",
+            "## D — Drift Rate",
+            window_refs.clone(),
+            "  cite INTRODUCTION and DISCOVERY turn indices (e.g. 0,7):",
+            |v: i32| v > 0
+        );
+        let (m, m_refs, m_reason) = score_proxy!(
+            "M",
+            "## M — Misattribution",
+            window_refs.clone(),
+            "  cite the capability-blame turn indices (e.g. 4):",
+            |v: i32| v > 0
+        );
+        for (letter, score, refs, reason) in [
+            ("H", h, h_refs, h_reason),
+            ("D", d, d_refs, d_reason),
+            ("M", m, m_refs, m_reason),
+        ] {
+            let mut s = base_sample(unit.clone(), refs);
+            s.scope = format!("{unit}/{letter}");
+            match letter {
+                "H" => s.health = score,
+                "D" => s.drift = score,
+                _ => s.misattribution = score,
             }
-            ScoreAnswer::Score(v) => Some(v),
-        };
-        println!("\n{M_ANCHORS}");
-        let m = match ask_score(&mut lines, "score M") {
-            ScoreAnswer::Abort => return rating_aborted(),
-            ScoreAnswer::Unratable => {
-                let Some(r) = ask_line(
-                    &mut lines,
-                    "  unratable reason for M (required — incomplete record / unverifiable evidence; absence of blame is M0, not unratable):",
-                ) else {
-                    return rating_aborted();
-                };
-                reasons.push(format!("M: {r}"));
-                None
+            if let Some(r) = reason {
+                s.unratable_reasons = format!("{letter}: {r}");
             }
-            ScoreAnswer::Score(v) => Some(v),
-        };
-        let mut s = base_sample(format!("window:{}", wi + 1), refs);
-        s.health = h;
-        s.drift = d;
-        s.misattribution = m;
-        s.unratable_reasons = reasons.join("; ");
-        samples.push(s);
+            samples.push(s);
+        }
     }
 
     let mut confirmed_episodes = 0usize;
     for (ei, ep) in projection.repair_episodes.iter().enumerate() {
+        let unit = format!("repair_episode:turn-{}", ep.initiating_turn);
         let t = &projection.turns[ep.initiating_turn];
+        let status = match ep.closed_at_exchange {
+            Some(x) => format!("closed at exchange {}", x + 1),
+            None => "OPEN — right-censored at session end (absence of another correction is not closure)".to_owned(),
+        };
+        println!("\n===== candidate external repair episode {} =====", ei + 1);
         println!(
-            "\n===== candidate external repair episode {} — initiated at turn [{}] ({}) =====",
-            ei + 1,
+            "  initiation: turn [{}] ({})",
             ep.initiating_turn,
             t.refs.join(" ")
         );
         for line in t.content.lines() {
             println!("      {line}");
         }
-        match ep.closed_at_exchange {
-            Some(x) => println!("  proposed closure: exchange {}", x + 1),
-            None => println!("  proposed closure: NOT closed in this session"),
-        }
-        let Some(confirm) = ask_line(
+        println!("  proposed status: {status}");
+        let Some(decision) = ask_line(
             &mut lines,
-            "confirm this as an external repair episode? [enter = yes / n = exclude]:",
+            "confirm episode? [enter = accept / x = exclude / o = mark OPEN instead]:",
         ) else {
             return rating_aborted();
         };
-        if confirm.eq_ignore_ascii_case("n") {
-            println!("  excluded (kept in audit trail as unconfirmed proposal).");
+        let (applied_closure, seg_decision, correction) = if decision.eq_ignore_ascii_case("x") {
+            let Some(why) = ask_required(&mut lines, "  exclusion note (required):") else {
+                return rating_aborted();
+            };
+            seg_records.push(wire::SegmentationRecord {
+                unit_id: unit,
+                proposal: status,
+                proposal_sha256: proposal_hash.clone(),
+                decision: "excluded".to_owned(),
+                correction: why,
+            });
             continue;
-        }
+        } else if decision.eq_ignore_ascii_case("o") {
+            (
+                None,
+                "adjusted",
+                "rater marked episode OPEN (right-censored)".to_owned(),
+            )
+        } else {
+            (ep.closed_at_exchange, "accepted", String::new())
+        };
+        seg_records.push(wire::SegmentationRecord {
+            unit_id: unit.clone(),
+            proposal: status.clone(),
+            proposal_sha256: proposal_hash.clone(),
+            decision: seg_decision.to_owned(),
+            correction: correction.clone(),
+        });
         confirmed_episodes += 1;
-        println!("\n{R_ANCHORS}");
+
+        // R citations are structural: initiation + repair work + closure.
+        let mut refs: Vec<String> = t.refs.clone();
+        let work_end = applied_closure
+            .and_then(|x| projection.exchanges.get(x))
+            .map(|ex| ex.ai_turn)
+            .unwrap_or(projection.turns.len().saturating_sub(1));
+        for turn in &projection.turns[ep.initiating_turn..=work_end] {
+            refs.extend(turn.refs.iter().cloned());
+        }
+        refs.dedup();
+
+        println!("\n{}", pinned_section("## R — Repair Cost"));
         let r = match ask_score(&mut lines, "score R") {
             ScoreAnswer::Abort => return rating_aborted(),
             ScoreAnswer::Unratable => {
-                let Some(reason) = ask_line(&mut lines, "  unratable reason for R (required):")
+                let Some(reason) = ask_required(&mut lines, "  unratable reason for R (required):")
                 else {
                     return rating_aborted();
                 };
-                let mut s = base_sample(
-                    format!("repair_episode:turn-{}", ep.initiating_turn),
-                    t.refs.clone(),
-                );
+                let mut s = base_sample(unit.clone(), refs);
+                s.scope = format!("{unit}/R");
                 s.unratable_reasons = format!("R: {reason}");
+                if applied_closure.is_none() {
+                    s.note = "episode right-censored (open at session end)".to_owned();
+                }
                 samples.push(s);
                 continue;
             }
             ScoreAnswer::Score(v) => Some(v),
         };
-        let mut s = base_sample(
-            format!("repair_episode:turn-{}", ep.initiating_turn),
-            t.refs.clone(),
-        );
+        let mut s = base_sample(unit.clone(), refs);
+        s.scope = format!("{unit}/R");
         s.repair_cost = r;
+        if applied_closure.is_none() {
+            s.note = "episode right-censored (open at session end)".to_owned();
+        }
         samples.push(s);
     }
 
-    // Canonical R_ev: confirmed EXTERNAL episodes per 10 completed exchanges.
     let r_ev = boundary::r_ev(confirmed_episodes, projection.exchanges.len());
     if let Some(rate) = r_ev {
         println!("\nR_ev (confirmed external episodes per 10 exchanges): {rate:.2}");
     }
 
-    if samples.is_empty() {
-        println!("\nnothing was scored — nothing recorded.");
+    // Persist whenever ANY structured decision or sample exists — segmentation
+    // audit records are kept even when nothing was scored. Only a full abort
+    // (handled above, atomically) writes nothing.
+    if samples.is_empty() && seg_records.len() <= 1 {
+        println!("\nnothing was decided or scored — nothing recorded.");
         return Ok(());
     }
 
@@ -1152,6 +1276,9 @@ fn cmd_rate(
         retry_of_run_id: String::new(),
         run_kind: wire::RunKind::RatingObservation as i32,
     }))?;
+    for record in &seg_records {
+        writer.append(JEvent::Segmentation(record.clone()))?;
+    }
     let count = samples.len();
     for s in samples {
         writer.append(JEvent::HrdmSampled(s))?;
@@ -1159,15 +1286,17 @@ fn cmd_rate(
     writer.append(JEvent::RunFinished(wire::RunFinished {
         status: wire::RunStatus::Succeeded as i32,
         summary: format!(
-            "hrdm CALIBRATION rating: {count} sample(s) by {rater_id} · {} · R_ev {} · {seg_note}",
+            "hrdm CALIBRATION rating: {count} sample(s), {} segmentation record(s) by {rater_id} · {} · proposal sha256 {} · R_ev {}",
+            seg_records.len(),
             HRDM_RUBRIC_VERSION,
-            r_ev.map(|v| format!("{v:.2}"))
-                .unwrap_or_else(|| "n/a".to_owned()),
+            proposal_hash,
+            r_ev.map(|v| format!("{v:.2}")).unwrap_or_else(|| "n/a".to_owned()),
         ),
         ..Default::default()
     }))?;
     println!(
-        "\nrecorded {count} calibration sample(s) → {}",
+        "\nrecorded {count} calibration sample(s) + {} segmentation record(s) → {}",
+        seg_records.len(),
         out_path.display()
     );
     println!("(draft adaptation: these are calibration data, never headline data.)");

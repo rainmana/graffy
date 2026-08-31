@@ -199,7 +199,10 @@ impl RunMetrics {
                     _ => {}
                 },
                 Event::HrdmSampled(_) => m.hrdm_samples += 1,
-                Event::Budget(_) | Event::McwSnapshot(_) => {}
+                Event::Budget(_)
+                | Event::McwSnapshot(_)
+                | Event::BoundaryEvent(_)
+                | Event::Segmentation(_) => {}
             }
         }
         m.max_node_visits = visits.values().copied().max().unwrap_or(0);
