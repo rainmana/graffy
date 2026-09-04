@@ -20,8 +20,10 @@ github.com/rainmana/mcw-framework). MCW is not decoration — it is in the
 type system. Information Units (with their five transfer stages), the six
 coordination failure modes (Drift, Asymmetric State Advancement, False
 Alignment, Overcompression, Constraint Opacity, Repair Suppression), the
-five repair operations, H/R/D/M observables, and evidence levels L0–L3 are
-protobuf types in `src/protos/mcw.proto`, journaled on every run. When you
+five repair operations, H/R/D/M observables, the operational support ladder,
+and the distinct MCW Article IV evidence layers L0–L4 are represented by
+protobuf types in `src/protos/mcw.proto`. Runtime observations are journaled;
+the Article IV ladder is reserved for empirical claims about MCW. When you
 design a feature, name the MCW construct it implements (see
 `docs/design/phase-2-mcp.md` §7 for the pattern).
 
