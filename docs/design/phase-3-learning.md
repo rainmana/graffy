@@ -8,7 +8,7 @@
 > (the facade/taxonomy design), and the framework itself:
 > <https://rainmana.github.io/mcw-framework/> (W. Alec Akin, Apache-2.0).
 
-## 1. MCW coverage matrix (honest audit, 2026-08-30)
+## 1. MCW coverage matrix (honest audit, 2026-09-04)
 
 Legend — **Schema**: typed in `src/protos/mcw.proto`. **Journaled**: emitted
 at runtime into run journals. **Acted on**: changes execution behavior.
@@ -30,8 +30,9 @@ at runtime into run journals. **Acted on**: changes execution behavior.
 | Repair op: Re-weighting | ✅ node kind | ⚠️ no path emits yet (no designated mode in canon) | ⬜ | ✅ (ready) |
 | Repair op: Disambiguation | ✅ node kind | ✅ via C2 when the judge names false_alignment | ✅ `PauseForDisambiguation` + interview follow-ups | ✅ |
 | Repair op: Synchronization | ✅ node kind | ✅ via C2 when the judge names asymmetric_state_advancement | ✅ | ✅ |
-| H/R/D/M observables | ✅ `HrdmSample` (anchored ordinal scores + rubric version + rater) | ⬜ **adaptation drafted, awaiting ratification** (§4) | ⬜ | ✅ sample counts (fold ready) |
-| Evidence levels L0–L3 | ✅ | ✅ every artifact | ✅ strict vs trace-only policy | ✅ distribution |
+| H/R/D/M observables | ✅ `HrdmSample` (anchored ordinal scores + rubric version + rater) | ✅ human calibration samples via `graffy rate` | ⬜ no adaptive behavior; model rater not built | ✅ sample and rating-journal counts |
+| Operational support ladder | ✅ `SupportLevel` | ✅ every artifact | ✅ deterministic support floor + strict/trace-only policy | ✅ distribution |
+| MCW Article IV evidence layers L0–L4 | ✅ `McwEvidenceLayer` | ⬜ no empirical-study path assigns them | ⬜ | ⬜ |
 | Evidence artifacts (hash-addressed) | ✅ | ✅ | ✅ ground-before-draft floor | ✅ counts |
 | McwStateSnapshot | ✅ | ⬜ | ⬜ | ⬜ |
 
@@ -40,8 +41,9 @@ measured (IUs, six failure modes via judge detection, evidence levels,
 convergence). The *repair* layer is now
 detection-driven (C2): failed attempts re-run with the judge's critique as
 CORRECTION IUs and journal RepairActions with honest observed costs. The *H/R/D/M scoring* layer has its
-canonical anchors in the framework repo; graffy's journal adaptation is
-drafted and awaits ratification (§4). Detection today is judge-based (one detector); per-mode
+canonical anchors in the framework repo; graffy's journal adaptation and
+human calibration collection path are implemented, but the adaptation still
+awaits ratification (§4). Detection today is judge-based (one detector); per-mode
 heuristic detectors are future work that the journal format already supports.
 
 ## 2. What ships the learning loop (C2–C4)
@@ -57,9 +59,9 @@ heuristic detectors are future work that the journal format already supports.
   alignment → disambiguation question surfaced; constraint opacity →
   constraints restated explicitly. RepairAction events finally get emitted
   by a real path (with `triggered_by_failure_id` back-links and token costs).
-  V1 scope: stops on PASS, attempt cap, or a missing signal; the
-  no-improvement early stop and human-in-the-loop repair paths are issue #1
-  v2 territory.
+  V1 scope: stops on PASS, attempt cap, or a missing signal. The open issue
+  still describes no-improvement early stopping and broader human-in-the-loop
+  repair work beyond the shipped slice.
 - **C3 — feedback meta-eval**: optional judge-the-judge pass scoring the
   critique's specificity and actionability before it is trusted as feedback;
   doubles as the **model-rater path for HRDM sampling** (§4).
@@ -77,17 +79,22 @@ call counts; IU counts; failure-mode frequencies (per run and aggregate);
 repair counts, per-op breakdown, and token cost; evidence-level
 distribution; escalation efficacy (success rate with vs. without ladder
 escalation — `null` when a cohort is empty, never a fabricated rate);
-convergence (visit-cap hits, max node visits, mean escalations/run); HRDM
-sample counts; approval outcomes.
+convergence (visit-cap hits, max node visits, mean escalations/run); external
+attempt groups and attempts-to-PASS; separately named run-passed and
+target-failure-resolution rates for repairs; HRDM sample and rating-journal
+counts; approval outcomes.
 
 **Next (in priority order)**:
-1. **Convergence curves** (C2): attempts-to-PASS distributions; verdict
-   deltas per retry; cost-to-convergence in tokens/seconds.
-2. **Repair efficacy**: post-repair PASS rate per (failure mode × repair
-   op) pair — *the* core empirical claim of the framework, testable.
+1. **Convergence curves beyond the shipped aggregate**: full
+   attempts-to-PASS distributions, verdict deltas per retry, and
+   cost-to-convergence in tokens/seconds.
+2. **Repair efficacy by pairing**: target-failure resolution per (failure
+   mode × repair op) pair — *the* core empirical claim of the framework,
+   without conflating a passing run with causal resolution.
 3. **Detection latency**: events between failure introduction and its
    FailureSignal (proxy: node distance draft→verify).
-4. **HRDM time series** per session once sampling lands (§4).
+4. **HRDM time series and reliability statistics** over the human calibration
+   samples now collected, followed by model samples once C3 lands (§4).
 5. **Real USD costs**: user-editable pricing tables arm the `cost_usd`
    budget leg (kept honestly 0.0 until then).
 6. **Cross-model comparison**: identical graphs re-run across tier
@@ -107,11 +114,12 @@ graffy's job is the **rating-substrate mapping** — where in a journal the
 canonical units live — drafted as a declared Article V extension in
 `docs/mcw/hrdm-in-graffy.md` (awaiting the author's ratification).
 
-Collection paths once the rubric exists:
+Collection paths:
 1. `graffy rate <session>` — **SHIPPED v1**: human scores proposed windows
    (H/D/M) and repair episodes (R) against the anchors; unratable units are
    recorded as absent; samples land in rating journals with rater +
-   rubric_version (source: HUMAN_SURVEY).
+   rubric_version (`HUMAN_RATER`; calibration-only while the adaptation is
+   draft).
 2. A rater graph (C3 kin) — a model scores the same journals against the
    same anchors (source: MODEL).
 3. **Inter-rater agreement between 1 and 2 is itself a publishable
@@ -123,7 +131,8 @@ Collection paths once the rubric exists:
 The controlled comparison graffy makes cheap: identical task suite, both
 arms journaled, `graffy metrics --json` per arm, diff the aggregates.
 
-- **Arm A (floor off)**: single `model` node — a raw prompt with a journal.
+- **Arm A (floor off)**: a minimal graph with a single `model` node — never a
+  raw execution shortcut — with a journal.
 - **Arm B (floor on)**: `intake → ground → draft → verify → respond`, C1
   detectors active; with C2, repairs active.
 - Primary outcomes: task success rate, unresolved-failure rate,
@@ -138,8 +147,9 @@ arms journaled, `graffy metrics --json` per arm, diff the aggregates.
 
 ## 6. Division of labor
 
-**graffy (any capable agent, guided by AGENT.md)**: C2/C3/C4 code, rater
-graph, `graffy rate`, bundle export, pricing tables, curves.
+**graffy (any capable agent, guided by AGENT.md)**: C3/C4 code, model-rater
+graph, reliability statistics, bundle export, pricing tables, and fuller
+curves. C2 and the first human `graffy rate` path are shipped.
 **@rainmana (framework author)**: ratify `docs/mcw/hrdm-in-graffy.md` (§4), task suites
 for the benchmark arms (10–30 prompts with pass criteria per domain),
 choice of first target venue/format for the research bundle.
