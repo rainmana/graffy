@@ -58,9 +58,12 @@ successors after review failure; `halt` stops. Unsupported policies fail compila
 Different tiers can still resolve to the same provider/model.
 
 Deadlines interrupt model, tool and approval waits. Retries share remaining tokens,
-recorded USD cost and time. Provider output ceilings use remaining tokens; reported
-input use can overshoot the total. Live prices remain unavailable, so USD ceilings
-cannot enforce actual spend. Cancellation cannot roll back external effects.
+recorded USD cost and time. Providers apply a separate per-call output cap (4,096
+by default, configurable per tier) bounded by the remaining aggregate allowance
+after a conservative input reserve. No model-limit discovery or exact tokenizer
+is implemented; reported usage can still overshoot the estimate. Live prices
+remain unavailable, so USD ceilings cannot enforce actual spend. Cancellation
+cannot roll back external effects. See ADR-0011 for the reserve policy.
 
 Operational `SupportLevel` is separate from study-level `McwEvidenceLayer`.
 Verification first checks receipts and support, then asks the configured reviewer

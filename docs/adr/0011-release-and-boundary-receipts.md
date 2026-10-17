@@ -27,9 +27,17 @@ CLI retries share remaining tokens, recorded USD cost, and elapsed time; TUI
 setup also consumes the run deadline. Quitting the live TUI cancels unfinished
 execution and closes its approval channel. Cancellation stops local waiting;
 it cannot undo an external tool effect or guarantee a provider stopped work.
-Model output ceilings are requested from remaining tokens; input token usage
-is known after the call and can exceed the remaining total. USD enforcement
-depends on supplied prices; current live invokers supply no pricing.
+The executor passes the remaining aggregate input-plus-output allowance to the
+invoker separately from the provider's per-completion output cap. Live calls
+default to 4,096 output tokens, configurable for each bound tier with
+`GRAFFY_MAX_OUTPUT_TOKENS_<TIER>`; there is no model-limit discovery. The adapter
+reserves one token per UTF-8 byte of system/prompt text plus 64 framing tokens,
+then takes the smaller of the configured output cap and the remaining allowance.
+An exhausted input reserve stops dispatch with a budget-exhausted outcome. The
+reserve is a conservative estimate, never recorded as measured usage; unknown
+provider overhead/tokenization can still overshoot, and actual input-plus-output
+usage remains authoritative. USD enforcement depends on supplied prices; current
+live invokers supply no pricing.
 
 Reviewers receive the original request and only source IUs the draft consumed.
 The graph's reviewer tier determines its provider, which can differ from the

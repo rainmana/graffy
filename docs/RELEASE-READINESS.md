@@ -16,8 +16,9 @@ Additional completed work:
 - Exact approval payloads/identity/hash, verbatim frontend decision input, and
   distinct abandonment; no artificial human turns from automatic approvals.
 - Model/tool/approval deadlines, cancellation on CLI signal/TUI quit, closed
-  approval-channel handling, remaining output-token requests, and whole-turn
-  retry budgets. TUI setup also consumes elapsed budget.
+  approval-channel handling, separate configurable per-call output caps with
+  estimated prompt reservation, and whole-turn retry budgets. TUI setup also
+  consumes elapsed budget.
 - Strict history loading, sequence/run identity checks, duplicate conflict
   detection, and indexed custom journal continuation.
 - Honored quality-failure halt policy, exact-draft review identity, request plus
@@ -305,8 +306,24 @@ the regression tests themselves are committed source. No live model-quality or
 paid-provider calls were made. Windows remains a development check, not a new
 supported binary-distribution target.
 
-Prepared on `codex/alpha6-readiness`. No push, tag, issue closure, or release
-publication is part of this preparation. Before publishing alpha.6, push/review
-the branch, require Linux/macOS CI on the accepted commit, then tag that exact
-commit `v0.1.0-alpha.6`. The tag workflow independently reruns gates and checks the
-three target binaries before publication. Chat remains the next Ratatui/CLI task.
+Prepared on `codex/alpha6-readiness` and submitted as
+[PR #19](https://github.com/rainmana/graffy/pull/19). Before publishing alpha.6,
+review/merge the branch, require Linux/macOS CI on the accepted commit, then tag
+that exact commit `v0.1.0-alpha.6`. The tag workflow independently reruns gates and
+checks the three target binaries before publication. Chat remains the next
+Ratatui/CLI task.
+
+### PR review follow-up: per-call token limits
+
+Codex correctly identified that passing the default 200,000-token run budget as
+a provider's generation cap can reject otherwise valid live calls. A capped
+Rig test model reproduced that failure before the fix. The request now names
+the aggregate allowance separately; the live adapter applies a configurable
+per-tier output cap and reserves estimated input usage (ADR-0011).
+
+Five new tests cover the original rejection, cap configuration, system/Unicode
+prompt reservation, avoiding provider dispatch when the input reserve exhausts
+the allowance, and the full default graph's success/budget-exhausted journals.
+After this follow-up, formatting and workspace Clippy pass, and the locked
+workspace suite has **105 passed, 0 failed, 1 ignored** on Windows GNU LLVM.
+These use local fakes; no paid-provider call or model-limit discovery is claimed.

@@ -165,7 +165,7 @@ async fn cancellation_interrupts_a_stalled_model() {
     std::fs::remove_file(out.journal_path).unwrap();
 }
 #[tokio::test]
-async fn token_ceiling_reaches_each_model_and_remaining_budget_stops_dispatch() {
+async fn aggregate_budget_reaches_each_invoker_and_exhaustion_stops_dispatch() {
     let f = Fake::default();
     let mut s = linear(&["intake", "model", "verify", "respond"]);
     s.policy.budget.max_tokens = Some(20);
@@ -176,7 +176,7 @@ async fn token_ceiling_reaches_each_model_and_remaining_budget_stops_dispatch() 
         .lock()
         .unwrap()
         .iter()
-        .map(|r| r.max_tokens)
+        .map(|r| r.remaining_token_budget)
         .collect();
     assert_eq!(caps, vec![Some(20), Some(15)]);
     std::fs::remove_file(out.journal_path).unwrap();

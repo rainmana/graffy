@@ -106,6 +106,18 @@ $ graffy run graffy.builtin.conversation --prompt "Explain the tradeoffs in this
 
 Replace the placeholders with model identifiers available from your provider. `graffy doctor` reports tier bindings and whether credential variables are present without printing their values.
 
+Live calls default to a **4,096-token output cap per completion**, independently
+of the graph's aggregate input-plus-output budget. Set
+`GRAFFY_MAX_OUTPUT_TOKENS_<TIER>` (for example,
+`GRAFFY_MAX_OUTPUT_TOKENS_BALANCED=2048`) to a positive integer supported by the
+bound model. This is an application default, not automatic model-limit discovery.
+Each call reserves one token per UTF-8 byte of its system and prompt text, plus
+64 tokens for message framing, before limiting output to the remaining budget.
+This conservative estimate can stop a call early; it is not an exact tokenizer
+count or a guarantee against provider overhead. Actual provider-reported usage
+still controls aggregate accounting. If the input reserve leaves no output
+allowance, the run stops as budget-exhausted before contacting the provider.
+
 > [!NOTE]
 > Provider token counts are recorded when the provider returns them. USD pricing tables are not implemented yet, so live model calls deliberately record `cost_usd = 0.0`; USD budget and cost output should not yet be treated as real spend accounting.
 

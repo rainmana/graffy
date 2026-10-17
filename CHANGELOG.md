@@ -11,9 +11,11 @@
   a correction turn instead. Human rejection and abandonment are distinct;
   actual decision input is preserved. Closing the TUI cancels unfinished work.
 - **Bounded execution:** model, tool, and approval waits respect deadlines.
-  Model calls receive remaining output-token ceilings. Retry attempts share
-  token, recorded-cost, and elapsed-time budgets. Input token use may still
-  overshoot before it is reported; live USD prices remain unavailable.
+  Live calls use a separate per-completion output cap (default 4,096, configurable
+  with `GRAFFY_MAX_OUTPUT_TOKENS_<TIER>`), bounded by remaining run tokens after
+  reserving estimated prompt usage. Retry attempts share token, recorded-cost,
+  and elapsed-time budgets. Actual input token use may still overshoot the
+  estimate; live USD prices remain unavailable.
 - **Review and release provenance:** the reviewer receives the original request
   and only source IUs consumed by the draft. Newly generated MCP facades review
   their digest. An exact-draft pass permits the "reviewed response" label;

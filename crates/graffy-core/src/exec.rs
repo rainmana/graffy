@@ -258,7 +258,9 @@ pub struct ModelRequest {
     pub system: String,
     pub prompt: String,
     pub temperature: Option<f64>,
-    pub max_tokens: Option<u64>,
+    /// Remaining whole-run allowance for input plus output, not a generation cap.
+    /// The provider adapter applies its separate per-call cap and reserves input.
+    pub remaining_token_budget: Option<u64>,
 }
 
 /// What came back, with enough metadata to journal honestly.
@@ -591,7 +593,7 @@ impl NodeCtx<'_> {
             system,
             prompt,
             temperature: None,
-            max_tokens: self.remaining_tokens,
+            remaining_token_budget: self.remaining_tokens,
         };
         let started = Instant::now();
         let response = self.invoker.complete(&request).await?;
@@ -1591,7 +1593,11 @@ impl Executor {
             }
 
             let (output, escalated) = match result {
-                Err(err @ (ExecError::Cancelled | ExecError::DeadlineExceeded)) => {
+                Err(
+                    err @ (ExecError::Cancelled
+                    | ExecError::DeadlineExceeded
+                    | ExecError::Model(ModelError::TokenBudgetExhausted { .. })),
+                ) => {
                     forced_status = Some(if matches!(err, ExecError::Cancelled) {
                         wire::RunStatus::Cancelled
                     } else {
