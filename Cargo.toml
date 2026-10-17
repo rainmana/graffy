@@ -91,6 +91,7 @@ async-trait.workspace = true
 clap.workspace = true
 directories.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 # Async runtime at the root from day one (ADR-0001): the Ratatui event loop
 # must stay non-blocking while the executor concurrently streams model tokens
 # and processes IUs. Workspace features include `macros` + `rt-multi-thread`.

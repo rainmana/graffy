@@ -3,14 +3,14 @@
 //! Entry points:
 //! * [`run_live`] — execute a graph while rendering the journal tap in real
 //!   time; PauseForDisambiguation checkpoints freeze the view with an
-//!   approve / reject / edit prompt; stays open for inspection afterwards.
+//!   approve / reject prompt; stays open for inspection afterwards.
 //! * [`run_replay`] — fold a finished journal and open the step inspector.
 //! * [`run_home`] — pick a journal from the runs directory and inspect it.
 //!
 //! Keys: `q`/`Esc` quit · `Tab` switch Run/Inspect · `↑`/`↓` select node ·
 //! `j`/`k` scroll detail. During an approval: `a` approve · `r` reject ·
-//! `e` approve-with-edit (type, `Enter` submits, `Esc` cancels the edit);
-//! quitting mid-approval rejects — nothing is ever released by silence.
+//! arrows scroll the exact payload. Quitting cancels an unfinished run;
+//! EOF/closed UI is not recorded as a human decision.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,8 +43,7 @@ enum View {
 struct ApprovalPrompt {
     node_id: String,
     question: String,
-    editing: bool,
-    buffer: String,
+    scroll: u16,
     reply: tokio::sync::oneshot::Sender<ApprovalOutcome>,
 }
 
@@ -86,6 +85,10 @@ impl ApprovalHandler for TuiApprovalHandler {
         "human-tui"
     }
 
+    fn is_human(&self) -> bool {
+        true
+    }
+
     async fn resolve(&self, node_id: &str, question: &str) -> ApprovalOutcome {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let request = ApprovalRequest {
@@ -94,9 +97,9 @@ impl ApprovalHandler for TuiApprovalHandler {
             reply: reply_tx,
         };
         if self.tx.send(request).is_err() {
-            return ApprovalOutcome::Rejected;
+            return ApprovalOutcome::Abandoned;
         }
-        reply_rx.await.unwrap_or(ApprovalOutcome::Rejected)
+        reply_rx.await.unwrap_or(ApprovalOutcome::Abandoned)
     }
 }
 
@@ -113,12 +116,16 @@ pub async fn run_live(
     journal_path: PathBuf,
     invoker: Arc<dyn ModelInvoker>,
     tool_invoker: Option<Arc<dyn ToolInvoker>>,
+    remaining_budget: graffy_core::control::RemainingBudget,
 ) -> Result<Option<RunOutcome>> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancellation = graffy_core::control::Cancellation::default();
     let executor = Executor {
+        cancellation: cancellation.clone(),
         event_tap: Some(tx),
         tool_invoker,
+        remaining_budget,
         ..Default::default()
     };
 
@@ -157,14 +164,15 @@ pub async fn run_live(
         &mut ui,
     );
     ratatui::restore();
-    loop_result?;
-
+    approval_rx.close();
+    ui.approval.take();
     if !task.is_finished() {
-        eprintln!(
-            "(quit before completion — letting the run finish headless so the journal stays whole)"
-        );
+        cancellation.cancel();
+        eprintln!("Run cancellation requested; already-started tool effects may have occurred.");
     }
-    match task.await {
+    let task_result = task.await;
+    loop_result?;
+    match task_result {
         Ok(Ok(outcome)) => Ok(Some(outcome)),
         Ok(Err(err)) => {
             eprintln!("run error: {err}");
@@ -297,8 +305,7 @@ fn live_loop(
             ui.approval = Some(ApprovalPrompt {
                 node_id: request.node_id,
                 question: request.question,
-                editing: false,
-                buffer: String::new(),
+                scroll: 0,
                 reply: request.reply,
             });
         }
@@ -364,48 +371,22 @@ fn handle_key(code: KeyCode, app: &AppState, ui: &mut UiState) -> bool {
 }
 
 fn handle_approval_key(code: KeyCode, ui: &mut UiState) -> bool {
-    let editing = ui.approval.as_ref().is_some_and(|p| p.editing);
-    if editing {
-        match code {
-            KeyCode::Enter => {
-                let text = ui
-                    .approval
-                    .as_ref()
-                    .map(|p| p.buffer.clone())
-                    .unwrap_or_default();
-                respond_approval(ui, ApprovalOutcome::Edited(text));
-            }
-            KeyCode::Esc => {
-                if let Some(p) = ui.approval.as_mut() {
-                    p.editing = false;
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(p) = ui.approval.as_mut() {
-                    p.buffer.pop();
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Some(p) = ui.approval.as_mut() {
-                    p.buffer.push(c);
-                }
-            }
-            _ => {}
-        }
-        return false;
-    }
     match code {
-        KeyCode::Char('a') => respond_approval(ui, ApprovalOutcome::Approved),
-        KeyCode::Char('r') => respond_approval(ui, ApprovalOutcome::Rejected),
-        KeyCode::Char('e') => {
-            if let Some(p) = ui.approval.as_mut() {
-                p.editing = true;
+        KeyCode::Char('a') => respond_approval(ui, ApprovalOutcome::ApprovedInput("a".into())),
+        KeyCode::Char('r') => respond_approval(ui, ApprovalOutcome::RejectedInput("r".into())),
+        KeyCode::Char('q') | KeyCode::Esc => {
+            respond_approval(ui, ApprovalOutcome::Abandoned);
+            return true;
+        }
+        KeyCode::Down | KeyCode::PageDown => {
+            if let Some(prompt) = &mut ui.approval {
+                prompt.scroll = prompt.scroll.saturating_add(1);
             }
         }
-        KeyCode::Char('q') | KeyCode::Esc => {
-            // Quitting mid-approval rejects — silence never releases.
-            respond_approval(ui, ApprovalOutcome::Rejected);
-            return true;
+        KeyCode::Up | KeyCode::PageUp => {
+            if let Some(prompt) = &mut ui.approval {
+                prompt.scroll = prompt.scroll.saturating_sub(1);
+            }
         }
         _ => {}
     }
@@ -608,22 +589,17 @@ fn draw_body(f: &mut Frame, app: &AppState, ui: &mut UiState, area: Rect) {
 
 fn draw_modal(f: &mut Frame, ui: &UiState, area: Rect) {
     let Some(prompt) = &ui.approval else { return };
-    let mut lines = vec![Line::from(prompt.question.clone())];
-    if prompt.editing {
-        lines.push(Line::from(format!("edit: {}▏", prompt.buffer)));
-    } else {
-        lines.push(Line::from(Span::styled(
-            "[a] approve · [r] reject · [e] approve with edit · q rejects & quits",
-            Style::new().fg(Color::DarkGray),
-        )));
-    }
     f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" approval required — {} ", prompt.node_id))
-                .border_style(Style::new().fg(Color::Yellow)),
-        ),
+        Paragraph::new(prompt.question.as_str())
+            .wrap(Wrap { trim: false })
+            .scroll((prompt.scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" approval — {} ", prompt.node_id))
+                    .title_bottom("[a] approve · [r] reject · ↑/↓ scroll · q cancels")
+                    .border_style(Style::new().fg(Color::Yellow)),
+            ),
         area,
     );
 }
@@ -684,5 +660,80 @@ fn node_style(state: wire::NodeState) -> Style {
         }
         wire::NodeState::Cancelled => Style::new().fg(Color::Magenta),
         _ => Style::new().fg(Color::Gray),
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    #[tokio::test]
+    async fn closing_the_ui_abandons_current_and_future_approval_requests() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handler = Arc::new(TuiApprovalHandler { tx });
+        let active = handler.clone();
+        let task = tokio::spawn(async move { active.resolve("gate", "payload").await });
+        let request = rx.recv().await.unwrap();
+        rx.close();
+        drop(request);
+        assert_eq!(task.await.unwrap(), ApprovalOutcome::Abandoned);
+        assert_eq!(
+            handler.resolve("future", "payload").await,
+            ApprovalOutcome::Abandoned
+        );
+    }
+    #[tokio::test]
+    async fn edit_key_cannot_approve_and_quit_abandons() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut ui = UiState::new(View::Run);
+        ui.approval = Some(ApprovalPrompt {
+            node_id: "gate".into(),
+            question: "payload".into(),
+            scroll: 0,
+            reply: tx,
+        });
+        assert!(!handle_approval_key(KeyCode::Char('e'), &mut ui));
+        assert!(ui.approval.is_some());
+        assert!(handle_approval_key(KeyCode::Esc, &mut ui));
+        assert_eq!(rx.await.unwrap(), ApprovalOutcome::Abandoned);
+    }
+    #[test]
+    fn approval_payload_wraps_and_scrolls_on_small_terminals() {
+        let (tx, _) = tokio::sync::oneshot::channel();
+        let mut ui = UiState::new(View::Run);
+        ui.approval = Some(ApprovalPrompt {
+            node_id: "gate".into(),
+            question: "Exact payload:\nFIRST\nline 2\nline 3\nline 4\nline 5\nLAST".into(),
+            scroll: 0,
+            reply: tx,
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 7)).unwrap();
+        terminal.draw(|f| draw_modal(f, &ui, f.area())).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("FIRST"));
+        assert!(!text.contains("LAST"));
+        for _ in 0..3 {
+            handle_approval_key(KeyCode::Down, &mut ui);
+        }
+        terminal.draw(|f| draw_modal(f, &ui, f.area())).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("LAST"));
+        for (w, h) in [(1, 1), (10, 3)] {
+            let mut tiny =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            tiny.draw(|f| draw_modal(f, &ui, f.area())).unwrap();
+        }
     }
 }

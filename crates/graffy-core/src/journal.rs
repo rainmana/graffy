@@ -38,7 +38,7 @@ pub struct JournalWriter {
 }
 
 impl JournalWriter {
-    /// Create (truncate) a journal at `path` for the given run.
+    /// Exclusively create a new journal; an existing path is never overwritten.
     pub fn create(path: &Path, run_id: &str) -> Result<Self, JournalError> {
         Self::create_with_tap(path, run_id, None)
     }
@@ -54,11 +54,7 @@ impl JournalWriter {
         {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
+        let file = OpenOptions::new().create_new(true).write(true).open(path)?;
         Ok(Self {
             out: BufWriter::new(file),
             path: path.to_path_buf(),
@@ -66,6 +62,66 @@ impl JournalWriter {
             seq: 0,
             tap,
         })
+    }
+
+    /// Append an output receipt only after the frontend successfully writes and
+    /// flushes the released answer. A single frontend owns delivery for each run.
+    pub fn deliver_response<W: std::io::Write>(
+        path: &Path,
+        run_id: &str,
+        output: &mut W,
+    ) -> Result<(), JournalError> {
+        let events = JournalReader::read_all(path)?;
+        let invalid = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "response delivery requires a successful matching journal",
+            )
+        };
+        if events.iter().any(|e| e.run_id != run_id)
+            || events.iter().rev().find_map(|e| match &e.event {
+                Some(Event::RunFinished(f)) => Some(f.status),
+                _ => None,
+            }) != Some(wire::RunStatus::Succeeded as i32)
+        {
+            return Err(invalid().into());
+        }
+        let mut released = events
+            .iter()
+            .find_map(|e| match &e.event {
+                Some(Event::BoundaryEvent(b)) if b.actor == "ai" && b.visibility == "released" => {
+                    Some(b.clone())
+                }
+                _ => None,
+            })
+            .ok_or_else(invalid)?;
+        if events.iter().any(|e| {
+            matches!(&e.event, Some(Event::BoundaryEvent(b))
+            if b.visibility == "delivered" && b.source_ref == released.source_ref)
+        }) {
+            return Ok(());
+        }
+        let label = if released.role == "verified_response" {
+            "reviewed response"
+        } else {
+            "response (not model-reviewed)"
+        };
+        writeln!(
+            output,
+            "\n================ {label} ================\n{}",
+            released.content
+        )?;
+        output.flush()?;
+        released.visibility = "delivered".into();
+        let mut writer = Self {
+            out: BufWriter::new(OpenOptions::new().append(true).open(path)?),
+            path: path.to_path_buf(),
+            run_id: run_id.to_owned(),
+            seq: events.last().map_or(0, |e| e.seq),
+            tap: None,
+        };
+        writer.append(Event::BoundaryEvent(released))?;
+        Ok(())
     }
 
     /// Append one event; returns the assigned sequence number.
@@ -124,13 +180,26 @@ pub fn event_kind(frame: &wire::RunEvent) -> &'static str {
 pub struct JournalReader;
 
 impl JournalReader {
-    /// Decode every frame in the file, in order.
+    /// Decode frames, rejecting broken sequence or run identity rather than silently hydrating partial history.
     pub fn read_all(path: &Path) -> Result<Vec<wire::RunEvent>, JournalError> {
         let data = std::fs::read(path)?;
         let mut cursor = data.as_slice();
-        let mut events = Vec::new();
+        let mut events: Vec<wire::RunEvent> = Vec::new();
         while !cursor.is_empty() {
-            events.push(wire::RunEvent::decode_length_delimited(&mut cursor)?);
+            let frame = wire::RunEvent::decode_length_delimited(&mut cursor)?;
+            let expected = events.last().map_or(1, |e| e.seq + 1);
+            if frame.seq != expected
+                || frame.run_id.is_empty()
+                || events.first().is_some_and(|e| e.run_id != frame.run_id)
+                || matches!(&frame.event, Some(Event::RunStarted(m)) if m.run_id != frame.run_id)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "journal sequence or run identity is inconsistent",
+                )
+                .into());
+            }
+            events.push(frame);
         }
         Ok(events)
     }

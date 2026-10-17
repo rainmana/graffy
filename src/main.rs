@@ -3,6 +3,8 @@
 //! Nothing — no prompt, no skill, no chat turn — executes outside an
 //! inspectable, durable, shareable agent graph. See docs/ARCHITECTURE.md.
 
+mod rating;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -66,6 +68,9 @@ enum Command {
         /// provider/model/tier/judge-label fields by construction).
         #[arg(long)]
         blinded: bool,
+        /// Apply a reviewed segmentation JSON file tied to this transcript hash.
+        #[arg(long)]
+        segmentation: Option<PathBuf>,
     },
     Run {
         /// Path to a TOML graph spec (see graphs/), or a registered graph id.
@@ -93,6 +98,9 @@ enum Command {
         /// canonical H/D/M window (docs/mcw/hrdm-in-graffy.md §1.3).
         #[arg(long)]
         session: Option<String>,
+        /// Declare this follow-up as a human correction (requires --session).
+        #[arg(long)]
+        correction: bool,
     },
     /// Replay a run journal: fold the event stream into a summary.
     Replay {
@@ -212,7 +220,8 @@ async fn main() -> anyhow::Result<()> {
             dir,
             rater,
             blinded,
-        } => cmd_rate(session, dir, rater, blinded),
+            segmentation,
+        } => cmd_rate(session, dir, rater, blinded, segmentation).await,
         Command::Run {
             spec,
             prompt,
@@ -221,7 +230,13 @@ async fn main() -> anyhow::Result<()> {
             journal,
             retry,
             session,
-        } => run_graph(spec, prompt, tui, offline, journal, retry, session).await,
+            correction,
+        } => {
+            run_graph(
+                spec, prompt, tui, offline, journal, retry, session, correction,
+            )
+            .await
+        }
         Command::Replay {
             journal,
             tui,
@@ -458,13 +473,13 @@ fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
     }
     let _ = &attempt_groups;
     println!(
-        "  repair fx    : run-passed {} of {} ({}) · target resolved {} of {} assessed ({})",
+        "  repair fx    : run-passed {} of {} ({}) · legacy mode non-recurrence {} of {} assessed ({})",
         aggregate.repairs_run_passed,
         aggregate.repairs,
         rate_str(aggregate.repair_run_passed_rate),
-        aggregate.repairs_target_resolved,
-        aggregate.repairs_resolution_assessed,
-        rate_str(aggregate.repair_target_resolution_rate)
+        aggregate.legacy_mode_not_repeated,
+        aggregate.legacy_recurrence_assessed,
+        rate_str(aggregate.legacy_mode_nonrecurrence_rate)
     );
     let _ = &sessions;
     println!(
@@ -539,6 +554,7 @@ async fn resolve_spec(spec_arg: &str) -> anyhow::Result<String> {
 /// 'auto' retry cap — bounded by design, like every loop in graffy.
 const DEFAULT_AUTO_RETRIES: u32 = 3;
 
+#[allow(clippy::too_many_arguments)]
 async fn run_graph(
     spec_arg: String,
     prompt: String,
@@ -547,165 +563,170 @@ async fn run_graph(
     journal: Option<PathBuf>,
     retry: Option<String>,
     session: Option<String>,
+    correction: bool,
 ) -> anyhow::Result<()> {
     let spec_text = resolve_spec(&spec_arg).await?;
     let spec = GraphSpec::from_toml_str(&spec_text)?;
-    let invoker = build_invoker(offline);
-    let tool_plane = build_tool_plane(&spec).await?;
-
-    // C2: retries are ALWAYS bounded — 'auto' means "until PASS or the
-    // default attempt cap", never "forever". Per-attempt token/time budgets
-    // still enforce inside each run.
-    let max_attempts: u32 = match retry.as_deref() {
-        None => 1,
-        Some("auto") => 1 + DEFAULT_AUTO_RETRIES,
-        Some(n) => {
-            1 + n.parse::<u32>().map_err(|_| {
-                anyhow::anyhow!("--retry takes a number of extra attempts or 'auto', got '{n}'")
-            })?
-        }
+    // Validate before starting any provider or MCP transport.
+    graffy_core::graph::CompiledGraph::compile(&spec)?;
+    let retries = match retry.as_deref() {
+        None => 0,
+        Some("auto") => DEFAULT_AUTO_RETRIES,
+        Some(n) => n
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("--retry takes a number or 'auto', got '{n}'"))?,
     };
-    if tui && max_attempts > 1 {
+    let max_attempts = retries
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("--retry is too large"))?;
+    if tui && (retries > 0 || session.is_some() || correction) {
+        anyhow::bail!("--retry, --session and --correction require plain CLI mode in alpha.6");
+    }
+    if correction && session.is_none() {
+        anyhow::bail!("--correction requires --session so the repair has conversation context");
+    }
+    if journal.as_ref().is_some_and(|p| p.exists()) {
         anyhow::bail!(
-            "--retry is not supported with --tui yet — run plain, then replay any attempt in the TUI"
+            "journal already exists; choose a new path (existing journals are never overwritten)"
         );
     }
-    if tui && session.is_some() {
-        anyhow::bail!(
-            "--session is not supported with --tui yet — boundary hydration is CLI-only for now \
-             (rejecting explicitly rather than silently ignoring the flag)"
-        );
-    }
-
-    if tui {
-        let journal_path =
-            journal.unwrap_or_else(|| runs_dir().join(format!("{}.journal", ulid_like_stamp())));
-        let Some(outcome) = graffy_tui::run_live(
-            spec.clone(),
-            spec_text.clone(),
-            prompt,
-            journal_path.clone(),
-            invoker,
-            tool_plane.clone(),
-        )
-        .await?
-        else {
-            std::process::exit(1);
-        };
-        report_outcome(&spec, &spec_text, outcome).await;
-        return Ok(());
-    }
-
     let continuing_session = session.is_some();
-    // P0.1: continuing a session hydrates the prior VISIBLE boundary
-    // conversation into the new run's context — otherwise "prompt 2 can
-    // reference response 1" would be false advertising.
-    let prior_boundary: Vec<(String, String)> = match &session {
-        Some(ses) => {
-            let runs = load_session_runs(&runs_dir(), ses);
+    let prior_boundary = match &session {
+        Some(id) => {
+            let runs = load_session_runs(&runs_dir(), id).await?;
+            if runs.is_empty() {
+                anyhow::bail!("unknown session '{id}'; omit --session to start a new conversation");
+            }
             let projection = graffy_core::boundary::project(&runs);
+            if projection
+                .turns
+                .iter()
+                .any(|t| t.visibility != graffy_core::boundary::Visibility::Visible)
+            {
+                eprintln!(
+                    "warning: history includes unconfirmed delivery; those contributions are excluded from model context"
+                );
+            }
             graffy_core::boundary::hydration_from(&projection)
         }
         None => Vec::new(),
     };
-    let mut session_id: Option<String> = session;
-    let mut feedback: Vec<graffy_core::exec::RepairFeedback> = Vec::new();
-    let mut attempt_group: Option<String> = None;
-    let mut prior_run_id: Option<String> = None;
-    for attempt in 1..=max_attempts {
-        let journal_path = match (&journal, attempt) {
-            (Some(path), 1) => path.clone(),
-            // Extra attempts always mint fresh journals — one file per run,
-            // linked by the shared session id (the repair episode's spine).
-            _ => runs_dir().join(format!("{}.journal", ulid_like_stamp())),
-        };
-        println!(
-            "graph '{}' v{} — executing (attempt {attempt}/{max_attempts}, every step journaled)",
-            spec.graph.name, spec.graph.version
-        );
-        let executor = Executor {
-            tool_invoker: tool_plane.clone(),
-            ..Default::default()
-        };
-        let outcome = executor
-            .run(
-                &spec,
-                &spec_text,
-                RunInput {
-                    prompt: prompt.clone(),
-                    session_id: session_id.clone(),
-                    feedback: std::mem::take(&mut feedback),
-                    attempt_group_id: attempt_group.clone(),
-                    attempt_index: attempt,
-                    retry_of_run_id: if attempt > 1 {
-                        prior_run_id.clone()
-                    } else {
-                        None
-                    },
-                    run_kind: if attempt > 1 {
-                        graffy_core::journal::wire::RunKind::AutomaticRetry as i32
-                    } else if continuing_session {
-                        graffy_core::journal::wire::RunKind::ExternalFollowup as i32
-                    } else {
-                        graffy_core::journal::wire::RunKind::InitialAttempt as i32
-                    },
-                    prior_boundary: prior_boundary.clone(),
-                },
-                &journal_path,
-                invoker.as_ref(),
-                &CliApprovalHandler,
-            )
-            .await?;
-        session_id = Some(outcome.session_id.clone());
-        attempt_group = Some(outcome.attempt_group_id.clone());
-        prior_run_id = Some(outcome.run_id.clone());
-        let succeeded = outcome.status == graffy_proto::journal::v1::RunStatus::Succeeded;
-        let harvest_path = outcome.journal_path.clone();
-        report_outcome(&spec, &spec_text, outcome).await;
-
-        if succeeded {
-            if attempt > 1 {
-                println!(
-                    "\nconverged on attempt {attempt}/{max_attempts} — internal repair sequence closed"
-                );
-            }
-            if let Some(ses) = &session_id {
-                println!(
-                    "continue this session (adds a boundary exchange): graffy run {spec_arg} --prompt \"...\" --session {ses}"
-                );
-            }
-            return Ok(());
+    let invoker = build_invoker(offline);
+    let turn_started = std::time::Instant::now();
+    let tool_plane = if let Some(seconds) = spec.policy.budget.max_seconds {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(seconds),
+            build_tool_plane(&spec),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("run deadline exhausted while connecting tools"))??
+    } else {
+        build_tool_plane(&spec).await?
+    };
+    if tui {
+        let path =
+            journal.unwrap_or_else(|| runs_dir().join(format!("{}.journal", ulid_like_stamp())));
+        let outcome = graffy_tui::run_live(
+            spec.clone(),
+            spec_text.clone(),
+            prompt,
+            path,
+            invoker,
+            tool_plane,
+            graffy_core::control::RemainingBudget {
+                duration: spec.policy.budget.max_seconds.map(|seconds| {
+                    std::time::Duration::from_secs(seconds).saturating_sub(turn_started.elapsed())
+                }),
+                ..Default::default()
+            },
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("run failed; see the journal"))?;
+        let status = outcome.status;
+        report_outcome(&spec, &spec_text, outcome).await?;
+        if status != wire::RunStatus::Succeeded {
+            anyhow::bail!("run ended {status:?}");
         }
-        if attempt == max_attempts {
-            if max_attempts > 1 {
-                println!(
-                    "\nretry budget exhausted ({max_attempts} attempts) — failing honestly; \
-                     the convergence series lives in this session's journals"
-                );
-            }
-            return Ok(());
+        return Ok(());
+    }
+    let cancellation = graffy_core::control::Cancellation::default();
+    let cancel_on_signal = cancellation.clone();
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel_on_signal.cancel();
         }
-        match harvest_feedback(&harvest_path, attempt) {
-            Some(item) => {
-                println!(
-                    "\nattempt {attempt} failed ({}) — retrying with the judge's critique as repair feedback",
-                    item.mode
-                        .as_str_name()
-                        .trim_start_matches("FAILURE_MODE_")
-                        .to_ascii_lowercase()
-                );
-                feedback = vec![item];
+    });
+    let result = async {
+        let mut session_id = session;
+        let mut feedback = Vec::new();
+        let mut attempt_group = None;
+        let mut prior_run_id = None;
+        let mut tokens_spent = 0u64;
+        let mut usd_spent = 0.0f64;
+        for attempt in 1..=max_attempts {
+            let remaining = graffy_core::control::RemainingBudget {
+                tokens: spec.policy.budget.max_tokens.map(|cap| cap.saturating_sub(tokens_spent)),
+                usd: spec.policy.budget.max_usd.map(|cap| (cap - usd_spent).max(0.0)),
+                duration: spec.policy.budget.max_seconds.map(|seconds|
+                    std::time::Duration::from_secs(seconds).saturating_sub(turn_started.elapsed())),
+            };
+            if remaining.tokens == Some(0) || remaining.usd == Some(0.0)
+                || remaining.duration.is_some_and(|d| d.is_zero()) {
+                anyhow::bail!("whole-turn budget exhausted; no further attempt started");
             }
-            None => {
-                println!(
-                    "\nattempt {attempt} failed with no failure signal to feed back — \
-                     stopping retries (nothing to repair from)"
-                );
+            let path = match (&journal, attempt) {
+                (Some(path), 1) => path.clone(),
+                _ => runs_dir().join(format!("{}.journal", ulid_like_stamp())),
+            };
+            println!("graph '{}' v{} — executing (attempt {attempt}/{max_attempts}, every step journaled)",
+                spec.graph.name, spec.graph.version);
+            let executor = Executor {
+                tool_invoker: tool_plane.clone(),
+                cancellation: cancellation.clone(),
+                remaining_budget: remaining,
+                ..Default::default()
+            };
+            let outcome = executor.run(&spec, &spec_text, RunInput {
+                prompt: prompt.clone(),
+                is_correction: correction,
+                session_id: session_id.clone(),
+                feedback: std::mem::take(&mut feedback),
+                attempt_group_id: attempt_group.clone(),
+                attempt_index: attempt,
+                retry_of_run_id: if attempt > 1 { prior_run_id.clone() } else { None },
+                run_kind: if attempt > 1 { wire::RunKind::AutomaticRetry }
+                    else if continuing_session { wire::RunKind::ExternalFollowup }
+                    else { wire::RunKind::InitialAttempt } as i32,
+                prior_boundary: prior_boundary.clone(),
+            }, &path, invoker.as_ref(), &CliApprovalHandler).await?;
+            session_id = Some(outcome.session_id.clone());
+            attempt_group = Some(outcome.attempt_group_id.clone());
+            prior_run_id = Some(outcome.run_id.clone());
+            tokens_spent = tokens_spent.saturating_add(outcome.input_tokens).saturating_add(outcome.output_tokens);
+            usd_spent += outcome.total_usd;
+            let status = outcome.status;
+            let harvest_path = outcome.journal_path.clone();
+            report_outcome(&spec, &spec_text, outcome).await?;
+            if status == wire::RunStatus::Succeeded {
+                if attempt > 1 { println!("converged on attempt {attempt}/{max_attempts} (internal execution only)"); }
+                println!("continue session: graffy run {spec_arg} --prompt \"...\" --session {}", session_id.as_deref().unwrap_or_default());
                 return Ok(());
             }
+            if matches!(status, wire::RunStatus::Cancelled | wire::RunStatus::BudgetExhausted) || attempt == max_attempts {
+                anyhow::bail!("run ended {status:?}; no answer released");
+            }
+            match harvest_feedback(&harvest_path, attempt) {
+                Some(item) => {
+                    println!("retrying with recorded review feedback (whole-turn budget still applies)");
+                    feedback = vec![item];
+                }
+                None => anyhow::bail!("run ended {status:?} with no repair signal; no further attempts"),
+            }
         }
-    }
-    Ok(())
+        anyhow::bail!("retry attempts exhausted")
+    }.await;
+    signal_task.abort();
+    result
 }
 
 /// Pull the most recent failure signal out of a journal — judge-named modes
@@ -735,84 +756,125 @@ fn harvest_feedback(
     })
 }
 
-/// Print one run's summary and index it in the store (shared by the plain
-/// and TUI paths, and by every retry attempt).
-async fn report_outcome(spec: &GraphSpec, spec_text: &str, outcome: RunOutcome) {
-    println!("\nrun     : {}", outcome.run_id);
-    println!("session : {}", outcome.session_id);
-    println!("status  : {:?}", outcome.status);
-    println!(
-        "tokens  : {} in / {} out   cost: ${:.4}   wall: {}ms",
-        outcome.input_tokens, outcome.output_tokens, outcome.total_usd, outcome.duration_ms
-    );
-    for note in &outcome.notes {
-        println!("note    : {note}");
-    }
-    println!("journal : {}", outcome.journal_path.display());
-    println!(
-        "inspect : graffy replay {} --tui",
-        outcome.journal_path.display()
-    );
-
-    match index_run(spec, spec_text, &outcome).await {
-        Ok(events) => println!(
-            "stored  : run indexed, {events} events mirrored to {}",
-            db_path().display()
-        ),
-        Err(err) => {
-            eprintln!("warning : store indexing failed ({err}) — journal file remains canonical")
+async fn report_outcome(
+    spec: &GraphSpec,
+    spec_text: &str,
+    outcome: RunOutcome,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    let delivered = (|| -> anyhow::Result<()> {
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
+        writeln!(
+            output,
+            "\nrun     : {}\nsession : {}\nstatus  : {:?}",
+            outcome.run_id, outcome.session_id, outcome.status
+        )?;
+        writeln!(
+            output,
+            "tokens  : {} in / {} out   cost: unavailable (pricing not configured)   wall: {}ms",
+            outcome.input_tokens, outcome.output_tokens, outcome.duration_ms
+        )?;
+        for note in &outcome.notes {
+            writeln!(output, "note    : {note}")?;
         }
+        writeln!(
+            output,
+            "journal : {}\ninspect : graffy replay \"{}\" --tui",
+            outcome.journal_path.display(),
+            outcome.journal_path.display()
+        )?;
+        if outcome.status == wire::RunStatus::Succeeded && outcome.final_text.is_some() {
+            JournalWriter::deliver_response(&outcome.journal_path, &outcome.run_id, &mut output)?;
+        }
+        output.flush()?;
+        Ok(())
+    })();
+    match index_run(spec, spec_text, &outcome).await {
+        Ok(_) => {}
+        Err(err) => eprintln!("warning: indexing failed ({err}); journal remains canonical"),
     }
-
-    if let Some(text) = outcome.final_text {
-        println!("\n================ verified response ================\n{text}");
-    }
+    delivered
 }
 
-/// Load a session's EXECUTION runs (rating observations excluded), ordered
-/// by validated manifest timestamps with deterministic tie-breaking — never
-/// by filename (P0.1).
-fn load_session_runs(
+async fn load_session_runs(
     dir: &std::path::Path,
     session: &str,
-) -> Vec<Vec<graffy_core::journal::wire::RunEvent>> {
+) -> anyhow::Result<Vec<Vec<graffy_core::journal::wire::RunEvent>>> {
     use graffy_core::journal::wire::run_event::Event as JEvent;
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|ext| ext == "journal"))
-                .collect()
-        })
-        .unwrap_or_default();
-    paths.sort(); // read order only; NOT the session order
-    let mut runs: Vec<Vec<graffy_core::journal::wire::RunEvent>> = Vec::new();
-    for p in &paths {
-        if let Ok(events) = JournalReader::read_all(p) {
-            let manifest = events.iter().find_map(|e| match &e.event {
-                Some(JEvent::RunStarted(m)) => Some(m.clone()),
-                _ => None,
-            });
-            if let Some(m) = manifest
-                && m.session_id == session
-                && m.graph_id != "graffy.mcw.rating"
-                && m.run_kind != graffy_core::journal::wire::RunKind::RatingObservation as i32
-            {
-                runs.push(events);
+    let mut paths = std::collections::BTreeSet::new();
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "journal") {
+                paths.insert(std::fs::canonicalize(path)?);
             }
         }
     }
+    if dir == runs_dir() {
+        let store = open_store().await?;
+        for path in store.session_journal_paths(session).await? {
+            paths.insert(std::fs::canonicalize(&path).map_err(|err| {
+                anyhow::anyhow!("session journal missing or unreadable: {path}: {err}")
+            })?);
+        }
+    }
+    let mut seen = std::collections::HashMap::new();
+    let mut runs = Vec::new();
+    for path in paths {
+        let events = JournalReader::read_all(&path).map_err(|err| {
+            anyhow::anyhow!(
+                "cannot establish complete session history: {}: {err}",
+                path.display()
+            )
+        })?;
+        let manifests: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Some(JEvent::RunStarted(m)) => Some(m),
+                _ => None,
+            })
+            .collect();
+        if manifests.len() != 1 {
+            anyhow::bail!("invalid journal manifest in {}", path.display());
+        }
+        let m = manifests[0];
+        if m.session_id != session
+            || m.graph_id == "graffy.mcw.rating"
+            || m.run_kind == wire::RunKind::RatingObservation as i32
+        {
+            continue;
+        }
+        if !events
+            .iter()
+            .any(|e| matches!(e.event, Some(JEvent::RunFinished(_))))
+        {
+            anyhow::bail!(
+                "unfinished session journal {}; inspect it with replay before continuing",
+                path.display()
+            );
+        }
+        let id = m.run_id.clone();
+        if let Some(previous) = seen.get(&id) {
+            if previous != &events {
+                anyhow::bail!("conflicting journals for run {id}");
+            }
+            continue;
+        }
+        seen.insert(id, events.clone());
+        runs.push(events);
+    }
     graffy_core::boundary::order_runs(&mut runs);
-    runs
+    Ok(runs)
 }
 
 /// Canonical rubric pin (immutable: framework commit + rubric content hash)
 /// plus the adaptation identifier, per §6 of the conformance review. The
 /// `-draft` suffix drops only after the section-8 gates pass AND the
 /// framework author explicitly ratifies that exact version.
-const HRDM_RUBRIC_VERSION: &str = "mcw-hrdm@8365d220+sha256.87ed2be6 + graffy-journal-map@v1-draft";
-const HRDM_ADAPTATION_VERSION: &str = "graffy-journal-map@v1-draft";
-const HRDM_SEGMENTATION_VERSION: &str = "boundary-projection@v2";
+const HRDM_RUBRIC_VERSION: &str = "mcw-hrdm@8365d220+sha256.87ed2be6 + graffy-journal-map@v2-draft";
+const HRDM_ADAPTATION_VERSION: &str = "graffy-journal-map@v2-draft";
+const HRDM_SEGMENTATION_VERSION: &str = "boundary-projection@v3";
 
 /// The pinned anchor tables, quoted VERBATIM from the canonical rubric file
 /// (commit 8365d220, sha256 87ed2be6). Rendered in full — never paraphrased.
@@ -891,17 +953,22 @@ fn rating_aborted() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parse turn indices ("2,7") into their journal refs.
-fn refs_for_indices(
-    projection: &graffy_core::boundary::BoundaryProjection,
-    input: &str,
-) -> Option<Vec<String>> {
-    let mut refs = Vec::new();
-    for part in input.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let idx: usize = part.parse().ok()?;
-        refs.extend(projection.turns.get(idx)?.refs.iter().cloned());
+/// Only explicitly listed choices count as a segmentation decision.
+fn ask_choice<R: std::io::BufRead>(
+    lines: &mut std::io::Lines<R>,
+    prompt: &str,
+    choices: &[&str],
+) -> Option<String> {
+    loop {
+        let answer = ask_line(lines, prompt)?;
+        if choices
+            .iter()
+            .any(|choice| answer.eq_ignore_ascii_case(choice))
+        {
+            return Some(answer);
+        }
+        println!("  choose one of the listed actions; 'q' aborts.");
     }
-    if refs.is_empty() { None } else { Some(refs) }
 }
 
 /// `graffy rate <session>` — human H/R/D/M sampling over the EXTERNAL
@@ -910,17 +977,18 @@ fn refs_for_indices(
 /// exclude / adjust) are persisted separately for every unit — even when
 /// nothing is scored — and the corrected segmentation is what gets scored.
 /// Aborting at ANY prompt writes nothing.
-fn cmd_rate(
+async fn cmd_rate(
     session: String,
     dir: Option<PathBuf>,
     rater: Option<String>,
     blinded: bool,
+    segmentation: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     use graffy_core::boundary::{self, BoundaryActor};
     use std::io::BufRead;
 
     let dir = dir.unwrap_or_else(runs_dir);
-    let runs_events = load_session_runs(&dir, &session);
+    let runs_events = load_session_runs(&dir, &session).await?;
     if runs_events.is_empty() {
         anyhow::bail!(
             "no runs found for session '{session}' in {} — every run prints its session id",
@@ -928,7 +996,7 @@ fn cmd_rate(
         );
     }
 
-    let projection = boundary::project(&runs_events);
+    let mut projection = boundary::project(&runs_events);
     let blinding_profile = if blinded {
         format!("{}+redacted-cli", boundary::BLINDING_PROFILE)
     } else {
@@ -958,7 +1026,14 @@ fn cmd_rate(
             BoundaryActor::Human => "HUMAN",
             BoundaryActor::Ai => "AI   ",
         };
-        println!("  [{}] {} {:?} ({})", i, actor, t.role, t.refs.join(" "));
+        println!(
+            "  [{}] {} {:?} {:?} ({})",
+            i,
+            actor,
+            t.role,
+            t.visibility,
+            t.refs.join(" ")
+        );
         for line in t.content.lines() {
             println!("      {line}");
         }
@@ -989,7 +1064,9 @@ fn cmd_rate(
             episode_lines.join(" | ")
         }
     );
-    let proposal_hash = graffy_core::exec::sha256_hex(proposal_summary.as_bytes());
+    let frozen = rating::snapshot(&projection);
+    let proposal_hash = graffy_core::exec::sha256_hex(frozen.as_bytes());
+    println!("snapshot sha256: {proposal_hash}");
     println!("\nproposed segmentation (frozen): {proposal_summary}");
 
     let stdin = std::io::stdin();
@@ -1000,11 +1077,28 @@ fn cmd_rate(
 
     let mut seg_records: Vec<wire::SegmentationRecord> = vec![wire::SegmentationRecord {
         unit_id: "projection".to_owned(),
-        proposal: proposal_summary.clone(),
+        proposal: frozen.clone(),
         proposal_sha256: proposal_hash.clone(),
         decision: "frozen".to_owned(),
         correction: String::new(),
     }];
+    if let Some(path) = segmentation {
+        let input = std::fs::read_to_string(&path)?;
+        let correction = rating::apply(&mut projection, &proposal_hash, &input)?;
+        seg_records.push(wire::SegmentationRecord {
+            unit_id: "projection".into(),
+            proposal: frozen,
+            proposal_sha256: proposal_hash.clone(),
+            decision: "adjusted".into(),
+            correction,
+        });
+        println!(
+            "Applied reviewed segmentation: {} exchanges, {} windows, {} episodes.",
+            projection.exchanges.len(),
+            projection.complete_windows.len(),
+            projection.repair_episodes.len()
+        );
+    }
     let mut samples: Vec<graffy_proto::mcw::v1::HrdmSample> = Vec::new();
     let base_sample = |unit_id: String, refs: Vec<String>| graffy_proto::mcw::v1::HrdmSample {
         sampled_at: Some(graffy_core::exec::now_ts()),
@@ -1038,7 +1132,7 @@ fn cmd_rate(
     // Per-proxy scoring helper: (score, refs, reason) with citations
     // required whenever the anchor depends on observed events (score > 0).
     macro_rules! score_proxy {
-        ($letter:expr, $marker:expr, $default_refs:expr, $cite_label:expr, $needs_cite:expr) => {{
+        ($letter:expr, $marker:expr, $default_refs:expr, $cite_label:expr, $needs_cite:expr, $window:expr) => {{
             println!("\n{}", pinned_section($marker));
             match ask_score(&mut lines, concat!("score ", $letter)) {
                 ScoreAnswer::Abort => return rating_aborted(),
@@ -1059,10 +1153,10 @@ fn cmd_rate(
                             let Some(cited) = ask_required(&mut lines, $cite_label) else {
                                 return rating_aborted();
                             };
-                            if let Some(refs) = refs_for_indices(&projection, &cited) {
+                            if let Some(refs) = rating::citation_refs(&projection, &cited, $window, $letter) {
                                 break refs;
                             }
-                            println!("  enter valid turn indices like: 0,3");
+                            println!("  cite visible turns in this window; D needs introduction/discovery >=3 exchanges apart; M requires human turns");
                         }
                     } else {
                         $default_refs
@@ -1083,9 +1177,10 @@ fn cmd_rate(
                 window_refs.extend(projection.turns[idx].refs.iter().cloned());
             }
         }
-        let Some(decision) = ask_line(
+        let Some(decision) = ask_choice(
             &mut lines,
             "score this window? [enter = accept / x = exclude]:",
+            &["", "x"],
         ) else {
             return rating_aborted();
         };
@@ -1115,21 +1210,24 @@ fn cmd_rate(
             "## H — MCW Health",
             window_refs.clone(),
             "  cite the turn indices evidencing the misalignment/rework (e.g. 0,3):",
-            |v: i32| v < 3
+            |v: i32| v < 3,
+            (*ws, *we)
         );
         let (d, d_refs, d_reason) = score_proxy!(
             "D",
             "## D — Drift Rate",
             window_refs.clone(),
             "  cite INTRODUCTION and DISCOVERY turn indices (e.g. 0,7):",
-            |v: i32| v > 0
+            |v: i32| v > 0,
+            (*ws, *we)
         );
         let (m, m_refs, m_reason) = score_proxy!(
             "M",
             "## M — Misattribution",
             window_refs.clone(),
             "  cite the capability-blame turn indices (e.g. 4):",
-            |v: i32| v > 0
+            |v: i32| v > 0,
+            (*ws, *we)
         );
         for (letter, score, refs, reason) in [
             ("H", h, h_refs, h_reason),
@@ -1168,9 +1266,10 @@ fn cmd_rate(
             println!("      {line}");
         }
         println!("  proposed status: {status}");
-        let Some(decision) = ask_line(
+        let Some(decision) = ask_choice(
             &mut lines,
             "confirm episode? [enter = accept / x = exclude / o = mark OPEN instead]:",
+            &["", "x", "o"],
         ) else {
             return rating_aborted();
         };
@@ -1215,6 +1314,15 @@ fn cmd_rate(
         }
         refs.dedup();
 
+        if applied_closure.is_none() {
+            let mut s = base_sample(unit.clone(), refs);
+            s.scope = format!("{unit}/R");
+            s.unratable_reasons = "R: right-censored; total repair cost is not observed".into();
+            s.note = "episode remains open; no numeric completed repair-cost score".into();
+            samples.push(s);
+            println!("R unratable: episode is open; completed repair cost is not observed.");
+            continue;
+        }
         println!("\n{}", pinned_section("## R — Repair Cost"));
         let r = match ask_score(&mut lines, "score R") {
             ScoreAnswer::Abort => return rating_aborted(),
@@ -1738,7 +1846,9 @@ async fn index_run(
             input_tokens: outcome.input_tokens as i64,
             output_tokens: outcome.output_tokens as i64,
             total_usd: outcome.total_usd,
-            journal_path: outcome.journal_path.display().to_string(),
+            journal_path: std::fs::canonicalize(&outcome.journal_path)?
+                .display()
+                .to_string(),
             spec_sha256: graffy_core::exec::sha256_hex(spec_text.as_bytes()),
         })
         .await?;
@@ -1913,24 +2023,35 @@ impl ApprovalHandler for CliApprovalHandler {
         "human-cli"
     }
 
+    fn is_human(&self) -> bool {
+        true
+    }
+
     async fn resolve(&self, node_id: &str, question: &str) -> ApprovalOutcome {
-        println!("\napproval required at node '{node_id}': {question}");
-        println!("  [y]es approve · anything else rejects · 'e <text>' approves with an edit");
-        let line = tokio::task::spawn_blocking(|| {
-            let mut buf = String::new();
-            std::io::stdin().read_line(&mut buf).ok();
-            buf
-        })
-        .await
-        .unwrap_or_default();
-        let line = line.trim();
-        if line.eq_ignore_ascii_case("y") || line.eq_ignore_ascii_case("yes") {
-            ApprovalOutcome::Approved
-        } else if let Some(edit) = line.strip_prefix("e ") {
-            ApprovalOutcome::Edited(edit.to_owned())
-        } else {
-            ApprovalOutcome::Rejected
+        use std::io::Write;
+        {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            if writeln!(output, "\napproval required at node '{node_id}': {question}\n[y]es approves; other input rejects. Edits must be submitted as a new correction turn.")
+                .and_then(|()| output.flush()).is_err() { return ApprovalOutcome::Abandoned; }
         }
+        // A detached input thread may outlive cancellation, but cannot keep the
+        // async runtime alive or release a later action.
+        let (send, receive) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let decision = match std::io::stdin().read_line(&mut line) {
+                Ok(0) | Err(_) => ApprovalOutcome::Abandoned,
+                Ok(_) if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") => {
+                    ApprovalOutcome::ApprovedInput(line.trim_end_matches(['\r', '\n']).to_owned())
+                }
+                Ok(_) => {
+                    ApprovalOutcome::RejectedInput(line.trim_end_matches(['\r', '\n']).to_owned())
+                }
+            };
+            let _ = send.send(decision);
+        });
+        receive.await.unwrap_or(ApprovalOutcome::Abandoned)
     }
 }
 

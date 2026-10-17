@@ -12,6 +12,7 @@
 //! * [`id`] — ULID-backed identifiers for every durable object.
 
 pub mod boundary;
+pub mod control;
 pub mod error;
 pub mod exec;
 pub mod graph;

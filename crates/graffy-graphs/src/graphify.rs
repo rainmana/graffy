@@ -146,7 +146,7 @@ fn conversation_floor(
             NodeSpec {
                 id: "intake".into(),
                 kind: "intake".into(),
-                description: "Decompose the request into Information Units.".into(),
+                description: "Record the complete request as one Information Unit.".into(),
                 model_tier: None,
                 params: toml::Table::new(),
             },

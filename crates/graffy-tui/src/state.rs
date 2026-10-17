@@ -333,7 +333,7 @@ impl AppState {
                 self.finished_summary = f.summary.clone();
                 self.feed(seq, format!("run finished — {}", status_word(self.status)));
                 self.novice_line = match self.status {
-                    Some(wire::RunStatus::Succeeded) => "done — answer verified and delivered.",
+                    Some(wire::RunStatus::Succeeded) => "done — graph completed successfully.",
                     Some(wire::RunStatus::Failed) => {
                         "stopped — the graph could not verify an answer."
                     }
@@ -446,7 +446,7 @@ fn novice_phrase(kind: Option<&str>, node_id: &str) -> String {
         Some("research") => "gathering evidence before answering…".to_owned(),
         Some("model") => "drafting a response from the gathered facts…".to_owned(),
         Some("verify") => "double-checking the draft before it reaches you…".to_owned(),
-        Some("respond") => "delivering the verified answer…".to_owned(),
+        Some("respond") => "preparing the answer for release…".to_owned(),
         Some("approval") => "waiting for a human decision…".to_owned(),
         Some(k) if k.starts_with("repair.") => "repairing shared understanding…".to_owned(),
         _ => format!("working on step '{node_id}'…"),

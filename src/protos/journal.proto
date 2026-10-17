@@ -203,10 +203,10 @@ message BudgetRecord {
 message BoundaryEventRecord {
   string actor = 1;              // "human" | "ai"
   // "prompt" | "correction" | "approval_question" | "approval_decision" |
-  // "verified_response"
+  // "verified_response" | "response"
   string role = 2;
-  string content = 3;            // verbatim boundary-visible content
-  string visibility = 4;         // "visible" | "unknown"
+  string content = 3;            // observed content/input; legacy handlers may use decision labels
+  string visibility = 4;         // "released" | "delivered" (output receipt) | "visible" (human/gate) | "unknown"
   string attempt_group_id = 5;
   // journal://<run_id>/<seq> of the underlying event carrying this content.
   string source_ref = 6;

@@ -443,6 +443,13 @@ pub fn generate_facade(
         params: digest_params,
     });
     nodes.push(NodeSpec {
+        id: "verify".into(),
+        kind: "verify".into(),
+        description: "Review the answer against the request and tool receipts.".into(),
+        model_tier: Some("balanced".into()),
+        params: toml::Table::new(),
+    });
+    nodes.push(NodeSpec {
         id: "respond".into(),
         kind: "respond".into(),
         description: "Deliver the grounded answer.".into(),
@@ -480,8 +487,19 @@ pub fn generate_facade(
     });
     edges.push(EdgeSpec {
         from: "digest".into(),
-        to: "respond".into(),
+        to: "verify".into(),
         when: None,
+    });
+
+    edges.push(EdgeSpec {
+        from: "verify".into(),
+        to: "respond".into(),
+        when: Some("verdict == 'pass'".into()),
+    });
+    edges.push(EdgeSpec {
+        from: "verify".into(),
+        to: "digest".into(),
+        when: Some("verdict == 'revise'".into()),
     });
 
     GraphSpec {

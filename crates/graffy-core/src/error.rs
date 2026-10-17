@@ -60,6 +60,10 @@ pub enum ToolError {
 /// Errors during graph execution.
 #[derive(Debug, Error)]
 pub enum ExecError {
+    #[error("run cancelled; already-started tool effects may have occurred")]
+    Cancelled,
+    #[error("run deadline exhausted; already-started tool effects may have occurred")]
+    DeadlineExceeded,
     #[error(transparent)]
     Spec(#[from] SpecError),
     #[error(transparent)]

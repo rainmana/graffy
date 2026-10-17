@@ -3,6 +3,22 @@
 > Canonical TODO tracking lives in [GitHub Issues](https://github.com/rainmana/graffy/issues). This file keeps design
 > breadcrumbs for tabled ideas; when picking up work, check Issues first.
 
+## Current next steps (2026-10-17)
+
+See [release readiness](RELEASE-READINESS.md) for the verified source/issue audit,
+release blockers, and remaining MCW work. The phase descriptions below include
+historical planning; they are not a current implementation checklist.
+
+Alpha.6 contains the reliability and MCW-recording fixes described in release
+readiness. The next feature is a chat-like interface in Ratatui and CLI. Every prompt still runs as a graph. Start chat on
+the existing conversation floor, share session/retry handling between interfaces,
+then add prompt-to-graph routing under issue #17. Graph activity can be exposed in
+an optional reasoning view; visualization is not a chat-release prerequisite.
+See [ADR-0010](adr/0010-chat-through-graphs.md) for scope and acceptance journeys.
+
+Desktop/web interfaces are **tabled indefinitely** by owner direction. Ratatui and
+CLI are the only interface work in scope.
+
 Phases gate scope; nothing ships half-instrumented. Telemetry schemas (journal + MCW) landed in
 Phase 0 precisely so later phases never retrofit observability.
 

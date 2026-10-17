@@ -19,11 +19,11 @@ Most agent harnesses treat the prompt as the program and leave orchestration hid
 
 - **Graphs are data.** Nodes, edges, guards, budgets, evidence policy, and model-routing tiers live in readable TOML files that can be diffed, versioned, exported, and imported.
 - **Runs are inspectable records.** Every run writes length-delimited protobuf events to an append-only `.journal` file and mirrors completed runs into embedded libSQL. `replay` folds those recorded events for inspection; it does not re-execute the graph.
-- **Loops are bounded.** The compiler rejects unguarded cycles; the executor enforces per-node visit caps and graph-level token, time, and USD ceilings.
+- **Loops are bounded.** The compiler rejects unguarded cycles; the executor enforces visit caps and deadlines, requests remaining output-token ceilings, and stops on recorded budget exhaustion. Input token use and unpriced USD costs have limits described below.
 - **Quality gates route visibly.** `verify` nodes return `PASS` or `REVISE`; revisions emit failure signals and move subsequent work up the graph's routing ladder.
 - **Tools are graph nodes.** MCP tools are discovered over stdio and wrapped in generated facade graphs. Destructive or unannotated tools receive a human approval gate by default.
-- **Human decisions are journaled.** Approval, rejection, and approve-with-edit outcomes include the decision source. EOF and abandoned approvals reject rather than silently release work.
-- **MCW concepts are typed.** Information Units, evidence artifacts, the six coordination failure modes, five repair operations, and H/R/D/M samples are represented in the protobuf schema. The current runtime records IUs and evidence, detects judge-labelled failures and visit-cap exhaustion, and journals retry repair episodes.
+- **Human decisions are journaled.** Approvals show exact payloads and preserve decision input. Reject and resubmit a correction to change a payload. EOF and abandoned approvals release nothing and do not invent a human decision.
+- **MCW concepts are typed.** Information Units, evidence artifacts, the six coordination failure modes, five repair operations, and H/R/D/M samples are represented in the protobuf schema. The current runtime records IUs and evidence, detects judge-labelled failures and visit-cap exhaustion, and journals internal retry repair attempts, separately from human repair episodes.
 
 ## Quick start
 
@@ -116,7 +116,7 @@ Built-ins are ordinary TOML specs. They are automatically seeded into the regist
 | Graph ID | Pipeline | Purpose |
 | --- | --- | --- |
 | `graffy.builtin.conversation` | intake → ground → draft → verify → respond | Minimum governed conversation path with a guarded draft-revision loop |
-| `graffy.builtin.conversation.gated` | conversation floor → human approval → respond | Prevents release until a human approves or edits the result |
+| `graffy.builtin.conversation.gated` | conversation floor → human approval → respond | Shows the exact reviewed draft and requires human approval before release |
 | `graffy.builtin.reasoning.sequential-thinking` | plan → think → critique → synthesize | Structured reasoning with a guarded critique loop |
 | `graffy.builtin.reasoning.decision-framework` | frame → evaluate → challenge → decide | Options, criteria, weighted evaluation, challenge, and recommendation |
 
@@ -136,10 +136,11 @@ Global option: `-v` enables debug logs and `-vv` enables trace logs. `RUST_LOG` 
 | `graffy` / `graffy tui` | Opens the journal-browser TUI | — |
 | `graffy init` | Creates the graffy home, run directory, database, and built-in graph records | — |
 | `graffy doctor` | Shows version, data paths, store counts, tier bindings, and credential presence | — |
-| `graffy run <SPEC> --prompt <TEXT>` | Runs a TOML path or registered graph ID | `--offline`, `--tui`, `--journal <PATH>`, `--retry <N|auto>` |
+| `graffy run <SPEC> --prompt <TEXT>` | Runs a TOML path or registered graph ID | `--offline`, `--tui`, `--journal <PATH>`, `--retry <N|auto>`, `--session <ID>`, `--correction` |
 | `graffy replay <JOURNAL>` | Folds a journal into a run summary | `--events`, `--tui` |
 | `graffy runs` | Lists indexed runs | `--limit <N>`; default `10` |
 | `graffy metrics` | Folds journals into per-run and aggregate MCW/runtime metrics | `--dir <PATH>`, `--json` |
+| `graffy rate <SESSION>` | Human HRDM calibration over the boundary transcript | `--rater`, `--blinded`, `--segmentation <JSON>`, `--dir` |
 | `graffy graph list` | Lists registered graphs | — |
 | `graffy graph export <ID>` | Writes a registered graph as shareable TOML | `--out <PATH>`; default `<id>.toml` |
 | `graffy graph import <PATH>` | Parses, compiles, validates, hashes, and registers a TOML graph | — |
@@ -158,7 +159,32 @@ $ graffy run graffy.builtin.conversation --prompt "..." --retry auto
 
 `--retry N` permits `N` extra attempts. `--retry auto` permits up to three extra attempts. Failed attempts only retry when graffy can harvest a failure signal; the judge's critique is injected into the next attempt as a correction IU, and all attempts share one session ID while keeping separate journal files.
 
-Retries are currently unavailable with `--tui`. Run in plain mode, then replay any attempt in the TUI.
+Retries share one whole-turn token/time/recorded-cost budget. Deadline expiry
+interrupts waiting models, tools, and approvals. Cancelling local work cannot undo
+an external effect or guarantee a provider stopped. Failed runs return nonzero.
+
+Retries and session continuation are currently unavailable with `--tui`. Run in
+plain mode, then replay any attempt in the TUI.
+
+### Session continuation and calibration
+
+```console
+$ graffy run graffy.builtin.conversation --prompt "Follow up" --session <session-id>
+$ graffy run graffy.builtin.conversation --prompt "Correction: use the other config" --session <session-id> --correction
+$ graffy rate <session-id> --rater <name> --blinded
+$ graffy rate <session-id> --rater <name> --segmentation correction.json
+```
+
+Continuation uses confirmed delivered history, including indexed custom journals.
+Unknown sessions and incomplete/corrupt history fail explicitly. `--correction`
+requires an existing session. Chat composition itself is still future work.
+
+Ratings use pinned anchors and complete five-exchange windows, not five runs.
+They remain **draft calibration data**. A reviewed segmentation file can correct
+exchange/window/episode boundaries while preserving the full original proposal.
+Open repair episodes are right-censored and receive no numeric total repair cost.
+See [the v2 draft adaptation](docs/mcw/alpha6-adaptation.md) for the JSON format,
+citation rules and prospective reliability protocol.
 
 ### Metrics
 
@@ -218,8 +244,10 @@ During registration graffy:
 Facade shape:
 
 ```text
-intake → prepare → [approve] → invoke → digest → respond
+intake → prepare → [approve] → invoke → digest → verify → respond
 ```
+
+On REVISE, the digest is regenerated and reviewed without re-invoking the tool. Existing stored facades are not silently rewritten; regenerate them to adopt this gate.
 
 Read-only tools are treated as evidence tools. Destructive tools are effectors. Unannotated tools default conservatively to effectors unless `--role evidence` is explicitly supplied. Effector facades include the human approval node.
 
@@ -248,7 +276,7 @@ Only complete MCP tool responses containing text or structured JSON are handled 
 | `j` / `k` or `PageDown` / `PageUp` | Scroll detail |
 | `q` / `Esc` | Quit |
 
-During an approval: `a` approves, `r` rejects, and `e` begins approve-with-edit. `Enter` submits an edit; `Esc` cancels editing. Quitting while approval is pending records a rejection. In the current runtime, an approval edit is preserved as the approval record's note; it does not rewrite the draft or create a correction IU.
+During an approval: `a` approves the displayed payload, `r` rejects, and arrows scroll it. `q`/`Esc` abandons the question and cancels unfinished execution. Edits require rejection and a new correction turn. The terminal output receipt confirms successful write/flush, not human attention or understanding.
 
 ### Graphify review
 
@@ -321,16 +349,14 @@ The project is intentionally pre-alpha. The main implementation boundaries are:
 
 - The generic `research` node is currently a structural no-op; it does not independently browse, query memory, or call MCP. Concrete MCP access works through generated `tool.invoke` facade graphs.
 - The `intake` node records the complete prompt as one L1 goal IU; it does not yet perform the decomposition described by the built-in graph prose.
-- Evidence policy and evidence levels are recorded and included in judge context, but the current `verify` node is model-judged rather than a complete deterministic claim-to-artifact validator.
-- `policy.routing.on_quality_fail` is serialized but not currently consulted. A `REVISE` result tier-escalates its passing successor when that successor's base tier appears in the ladder; a different provider or model is only used if the environment bindings make it so.
+- Reviewers receive the original request and source IUs already consumed by the draft, through the graph-configured reviewer provider. Receipt/support checks are deterministic; claim entailment remains model-judged. Prompt receipts alone do not prove factual claims.
+- `policy.routing.on_quality_fail` accepts `escalate` or `halt`. Different tiers use a different provider/model only when environment bindings make them different.
 - Broader MCW streaming detectors, durable learned lessons, automatic compaction graphs, and H/R/D/M raters are Phase 3 work. Current detection covers judge-labelled review failures and visit-cap exhaustion.
 - The database is a graph/run/journal/MCP registry today. Episodic FTS memory, vector retrieval, temporal knowledge graphs, and layered recall are not implemented yet.
 - Multi-persona `agent.conversation` execution and benchmark/evaluation runners are scaffolded, not active node kinds.
-- A completed graph run can report `Failed`, `Cancelled`, or retry exhaustion while the CLI process still exits successfully; inspect the printed run status or journal rather than relying only on the shell exit code. Setup, parsing, provider, transport, and other command errors still return an error.
-- Approval edits are attribution-bearing notes today; they do not rewrite the approved draft.
-- Cost output remains zero until provider pricing tables land.
+- Token counts are accounted after calls; a remaining output-token request is not a hard bound on total input plus output. USD accounting remains unavailable until pricing is configured.
 - MCP is stdio-only, and its stored argument tail is space-separated; complex shell quoting is not preserved as a shell would preserve it.
-- Supplying an existing `--journal` path truncates that file before the new run; journals are append-only only after creation.
+- Existing `--journal` paths are rejected. Legacy responses without delivery receipts remain inspectable but are excluded from confirmed conversation history.
 - The TUI may show overlapping text under some Windows Terminal/WSL resize and glyph-width combinations; see [Known Issues](docs/KNOWN-ISSUES.md).
 
 See [the roadmap](docs/ROADMAP.md) and [open GitHub issues](https://github.com/rainmana/graffy/issues) for planned work.
