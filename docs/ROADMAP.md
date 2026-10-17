@@ -16,6 +16,10 @@ then add prompt-to-graph routing under issue #17. Graph activity can be exposed 
 an optional reasoning view; visualization is not a chat-release prerequisite.
 See [ADR-0010](adr/0010-chat-through-graphs.md) for scope and acceptance journeys.
 
+After the Ratatui/CLI chat interface ships, consider **native Windows CI and
+release builds** as a low-priority portability task. This is a follow-up to chat,
+not an alpha.6 or chat-release requirement; see the deferred item below.
+
 Desktop/web interfaces are **tabled indefinitely** by owner direction. Ratatui and
 CLI are the only interface work in scope.
 
@@ -87,6 +91,16 @@ Goal: a stranger can watch a prompt refuse to run raw.
 
 ## Tabled by request (post-Phase-1, recorded so they cannot get lost)
 
+- **Native Windows builds — low priority, after Ratatui/CLI chat** (owner request,
+  2026-10-17): add Windows x64 build/test coverage to GitHub Actions, then a
+  release ZIP containing `graffy.exe`, LICENSE, NOTICE, and README. Evaluate the
+  hosted MSVC toolchain first; the successful local GNU LLVM alpha.6 build is
+  feasibility evidence, not a settled distribution/toolchain decision. Verify
+  dependencies and the Python MCP fixture, Windows process/argument handling,
+  tag/version agreement, and offline init/run/replay/chat smoke journeys before
+  adding the artifact to releases. Check native Windows Terminal/PowerShell
+  approvals, cancellation, keyboard input, Unicode, and resize separately from
+  headless CI. WSL testing does not substitute for native Windows validation.
 - **Signed + notarized macOS releases**: @rainmana holds a paid Apple Developer
   membership; wire Developer ID Application signing (`codesign`) and notarization
   (`notarytool` submit + staple) into the release workflow via GitHub secrets so

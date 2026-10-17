@@ -139,6 +139,9 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
 - Next: chat in Ratatui and CLI, every prompt still a graph (ADR-0010).
   Desktop/web is tabled indefinitely. The optional graph inspection view is not
   a prerequisite for chat.
+- After chat: native Windows x64 CI/release builds are a low-priority portability
+  follow-up requested by the owner; see ROADMAP. Windows is not yet a supported
+  release target, and this work does not gate alpha.6 or chat.
 - Open TODOs live in GitHub Issues. `docs/RELEASE-READINESS.md` distinguishes the
   original audit from implemented fixes and final verification. Historical design
   docs must not be treated as claims of shipped capability.
