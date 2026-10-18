@@ -29,7 +29,7 @@ on_quality_fail = "escalate"
 [[node]]
 id = "intake"
 kind = "intake"
-description = "Decompose the request into Information Units."
+description = "Record the complete request as one Information Unit."
 
 [[node]]
 id = "ground"

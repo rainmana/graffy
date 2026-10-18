@@ -42,6 +42,10 @@ pub enum JournalError {
 /// Errors from a model invoker (provider layer or offline stub).
 #[derive(Debug, Error)]
 pub enum ModelError {
+    #[error(
+        "run token budget exhausted before model dispatch: {remaining} remaining, {input_reserve} reserved for input (estimate)"
+    )]
+    TokenBudgetExhausted { remaining: u64, input_reserve: u64 },
     #[error("no model bound for tier '{tier}' — {hint}")]
     UnboundTier { tier: String, hint: String },
     #[error("provider error: {0}")]
@@ -60,6 +64,10 @@ pub enum ToolError {
 /// Errors during graph execution.
 #[derive(Debug, Error)]
 pub enum ExecError {
+    #[error("run cancelled; already-started tool effects may have occurred")]
+    Cancelled,
+    #[error("run deadline exhausted; already-started tool effects may have occurred")]
+    DeadlineExceeded,
     #[error(transparent)]
     Spec(#[from] SpecError),
     #[error(transparent)]

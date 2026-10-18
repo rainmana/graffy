@@ -54,7 +54,7 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
 - `graffy-mcp` — rmcp 3.1 stdio client, discovery with annotation-seeded
   roles (`readOnlyHint→evidence`, `destructiveHint→effector`+approval gate,
   unknown→effector: conservative always), prompts-primitive import as usage
-  knowledge, facade generation (`prepare → [approve] → invoke → digest`),
+  knowledge, facade generation (`prepare → [approve] → invoke → digest → verify → respond`),
   the usage interview logic (`interview.rs`, pure + unit-tested).
   Test fixture: `tests/fixture/mini_server.py` — a genuine MCP stdio server
   in Python; the full client round-trip runs hermetically in CI.
@@ -120,34 +120,38 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
   mandatory. Apple signing/notarization is tabled (he has a paid Apple
   Developer membership) — see ROADMAP.
 
-## Where the project is (2026-08-30)
+## Where the project is (alpha.6, 2026-10-17)
 
-- **Phase 1 complete** (engine, journal, MCW schema, providers, TUI with
-  approvals, libSQL store) — shipped and field-verified.
-- **Phase 2 core shipped**: tool plane, rmcp client + skill-fronted facades,
-  prompts-as-knowledge + MCW-instrumented interview, graphify with all
-  three involvement tiers.
-- **Phase 3 in progress — the MCW learning loop** (design + coverage
-  matrix: docs/design/phase-3-learning.md). SHIPPED: C1 detectors (verify
-  judges name the failure mode; cap-exhaustion signals), C5 v1 (`graffy
-  metrics` folds journals into research metrics; `graffy init` + ~/.graffy
-  home), C2 v1 (`--retry n|auto` — judge critiques feed back as
-  CORRECTION IUs; RepairActions journaled with failure back-links and
-  observed costs; always attempt-capped). NEXT: C3 feedback meta-eval +
-  model HRDM raters, C4 durable Lessons for BOTH the agent (injected
-  knowledge) and the human (prompting improvement), C5b `graffy rate` per
-  docs/mcw/hrdm-in-graffy.md + pricing tables + portable research bundles.
-  Everything that executes does so as a graph. **Open TODOs are filed as
-  GitHub Issues — read those before inventing work.**
-- Big tabled items: model-assisted graphify decomposition (B2), structural
-  editing in collaborative review, HTTP MCP transport, theme engine +
-  accessibility deepening, Apple signing, LangGraph export, graffy
-  administering graffy.
+- Runtime, journals, provider adapters, MCP facades, graphification, store and
+  Ratatui inspection work. The graph loop is serial; general branch/join scheduling
+  is not implemented.
+- Release fixes: exclusive journal creation, policy validation, nonzero failure
+  exits, exact-payload approvals, cancellation/deadlines, whole-turn retry budgets,
+  output receipts, exact-draft review identity, and strict session-history loading.
+- MCW: typed IUs/support artifacts, judge hypotheses, internal retry repair
+  records, human corrections, confirmed boundary exchanges, and human HRDM
+  calibration with frozen proposals and reviewed segmentation. Read
+  `docs/mcw/alpha6-adaptation.md`; the instrument remains draft. Preserve pinned
+  anchors and the historical author review. Do not equate run success, same-mode
+  non-recurrence, or a delivery receipt with target repair or human understanding.
+- The generic research node is a no-op. Intake uses a whole-prompt IU.
+  `graffy-mcw` exports vocabulary; `graffy-agents` and `graffy-evals` are scaffolds.
+  FTS/vectors/temporal recall, learned lessons, model raters, fine-grained claim
+  grounding, executable repair graphs, pricing and bundles remain future work.
+- Next: chat in Ratatui and CLI, every prompt still a graph (ADR-0010).
+  Desktop/web is tabled indefinitely. The optional graph inspection view is not
+  a prerequisite for chat.
+- After chat: native Windows x64 CI/release builds are a low-priority portability
+  follow-up requested by the owner; see ROADMAP. Windows is not yet a supported
+  release target, and this work does not gate alpha.6 or chat.
+- Open TODOs live in GitHub Issues. `docs/RELEASE-READINESS.md` distinguishes the
+  original audit from implemented fixes and final verification. Historical design
+  docs must not be treated as claims of shipped capability.
 
 ## Quick commands
 
 ```
-cargo test --workspace                       # 40+ tests, all offline
+cargo test --workspace                       # offline suite; live MCP test is explicitly ignored
 cargo run -- run graffy.builtin.conversation --prompt "hi" --offline --tui
 cargo run -- run <graph> --prompt "..." --retry auto   # C2 repair-feedback retries
 cargo run -- rate <session-id> [--blinded]   # boundary-transcript HRDM rating (calibration)

@@ -323,13 +323,13 @@ message RepairAction {
   double cost_seconds = 12;
   uint32 cost_turns = 13;
   string summary = 14;
-  // DEPRECATED semantics: true means the repairing RUN passed verify — it
+  // DEPRECATED semantics: true means the repairing RUN succeeded — it
   // does NOT establish that the target failure was causally resolved
   // (Blocker G; see target_failure_resolved).
   bool successful = 15;
-  // Whether the SPECIFIC target failure stopped recurring (v1 proxy:
-  // same-mode recurrence in the repairing run; IU-continuity replaces this
-  // once declared segmentation lands). Absent = not established.
+  // Whether the SPECIFIC target failure was established to be resolved.
+  // Absent without target/IU continuity evidence. Runtime retries leave it absent;
+  // legacy v1 values were a same-mode proxy, not validated resolution evidence.
   optional bool target_failure_resolved = 16;
 }
 

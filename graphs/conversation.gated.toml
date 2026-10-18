@@ -1,7 +1,7 @@
 # graffy built-in — Gated Conversation.
 # The default conversation floor plus a human release gate: nothing reaches
 # the user until a human approves the verified draft. PauseForDisambiguation
-# in action — the TUI freezes with an approve/reject/edit prompt; the plain
+# in action — the TUI freezes with an approve/reject prompt; the plain
 # CLI asks on stdin (and REJECTS on EOF, so pipes can never rubber-stamp).
 
 [graph]
@@ -29,12 +29,12 @@ on_quality_fail = "escalate"
 [[node]]
 id = "intake"
 kind = "intake"
-description = "Decomposes the user turn into Information Units."
+description = "Records the complete user request as one Information Unit."
 
 [[node]]
 id = "ground"
 kind = "research"
-description = "Collects evidence artifacts the draft's claims will need."
+description = "Reserved grounding slot; external evidence requires concrete tool nodes."
 
 [[node]]
 id = "draft"
@@ -53,7 +53,7 @@ id = "release"
 kind = "approval"
 description = "Human release gate: the verified draft waits for a human decision."
 [node.params]
-question = "Release this verified answer to the user?"
+question = "Release this reviewed answer to the user?"
 
 [[node]]
 id = "respond"

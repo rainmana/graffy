@@ -1,18 +1,23 @@
 # Single-binary distribution (ADR-0002): Linux x86_64 + aarch64 as fully
 # static musl binaries (no glibc floor — runs on any distro), macOS Apple
-# Silicon. Tag a version (v0.1.0-alpha.4) to build and attach binaries.
+# Silicon. Tag a version matching Cargo.toml to build and attach binaries.
+
+name: Release
 
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: build (${{ matrix.target }})
     strategy:
@@ -36,17 +41,34 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --bin graffy
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin graffy
         env:
           CC: ${{ contains(matrix.target, 'musl') && 'musl-gcc' || 'cc' }}
       - name: Smoke test the built binary
-        run: ./target/${{ matrix.target }}/release/graffy --version
+        shell: bash
+        run: |
+          binary="./target/${{ matrix.target }}/release/graffy"
+          test "$("$binary" --version)" = "graffy ${GITHUB_REF_NAME#v}"
+          export GRAFFY_HOME="$(mktemp -d)"
+          "$binary" init
+          "$binary" run graffy.builtin.conversation --prompt "release smoke test" --offline
+          "$binary" metrics --json
       - name: Package
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/graffy" dist/
           cp LICENSE NOTICE.md README.md dist/
-          tar -C dist -czf "graffy-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" .
+          python3 - <<'PY'
+          import os, pathlib, tarfile
+          archive = f"graffy-{os.environ['GITHUB_REF_NAME']}-${{ matrix.target }}.tar.gz"
+          def normalize(info):
+              info.uid = info.gid = 0
+              info.uname = info.gname = ""
+              return info
+          with tarfile.open(archive, "w:gz") as output:
+              for path in sorted(pathlib.Path("dist").iterdir()):
+                  output.add(path, arcname=path.name, filter=normalize)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: graffy-${{ matrix.target }}
@@ -54,7 +76,9 @@ jobs:
 
   publish:
     name: publish release
-    needs: build
+    needs: [checks, build]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -65,3 +89,4 @@ jobs:
         with:
           files: artifacts/*.tar.gz
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

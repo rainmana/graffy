@@ -12,3 +12,6 @@ graffy-core.workspace = true
 async-trait.workspace = true
 rig-core.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

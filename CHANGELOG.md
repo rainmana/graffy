@@ -2,57 +2,45 @@
 
 ## Unreleased (v0.1.0-alpha.6)
 
-- **MCW conformance repairs** (author review, Blockers A-J —
-  docs/mcw/hrdm-in-graffy.md is now the authoritative conformance doc):
-  boundary-transcript projection separates canonical HCW-ACW turns/exchanges
-  from internal orchestration (retries are internal repair sequences, never
-  canonical episodes); `graffy run --session <id>` continues a session
-  across prompts so real five-exchange windows exist; `graffy rate` rebuilt
-  on the boundary projection (complete windows only, external episodes with
-  per-episode confirmation, M0 vs M-unratable per canon, required unratable
-  reasons, journal:// citations on every score, tested condition-blind
-  projection, immutable rubric/adaptation pins, HUMAN_RATER provenance,
-  calibration-only labeling); the operational claim-support ladder is
-  renamed SupportLevel and formally separated from the canonical
-  McwEvidenceLayer (Article IV); the support floor is enforced
-  deterministically before any judge; draft claims inherit consumed-IU
-  evidence lineage; fabricated five-stage fidelity records removed
-  (fidelity/salience now optional + sourced); judge failure labels are
-  uncalibrated hypotheses linked to their output artifact; repair outcomes
-  distinguish run-passed from target-failure-resolved. Existing draft
-  samples remain draft calibration data — nothing is relabeled.
-
-- **`graffy rate <session>`** — the first HRDM collection path: graffy does
-  the mechanical work (finds the session's runs, proposes 5-run windows and
-  repair episodes per the adaptation doc), the human makes the anchored
-  0-3 judgments (H/D/M per window, R per episode; 'u' records unratable as
-  absent, EOF/q aborts recording nothing). Samples carry rater, source
-  (HUMAN_SURVEY), and a pinned rubric_version, and land in a rating journal
-  `graffy metrics` reads like any other. graffy never scores itself.
-- **Session convergence metrics**: `graffy metrics` now folds sessions —
-  attempts-to-pass, sessions converged after retry, mean attempts to
-  converge, and repair efficacy (successful/total RepairActions, null when
-  none ran) — the C2 research numbers, from real journals only.
-
-- **C2 — retry-with-feedback**: `graffy run --retry <n|auto>`. Failed runs
-  re-execute in the same session with the judge's critique injected as
-  CORRECTION IUs (on the same review-feedback channel the in-run revise
-  loop uses), and every retry attempt journals a `RepairAction` — canonical
-  failure→repair mapping (drift→re-grounding, overcompression→decompression,
-  false alignment→disambiguation, asymmetric advancement→synchronization;
-  re-grounding as the framework's own universal fallback for the two modes
-  with no canonical op), back-linked to the triggering FailureSignal, with
-  observed token/time costs and the honest outcome. Retries are ALWAYS
-  bounded ('auto' = 3 extra attempts) — unbounded repair is unlawful for
-  the same reason unguarded cycles are. A session's journals ARE the repair
-  episode — exactly the rating unit the H/R/D/M instrument scores.
-- **HRDM journal adaptation**: `docs/mcw/hrdm-in-graffy.md` — a declared
-  Article V extension mapping the framework's canonical rating units onto
-  graffy sessions (exchange = run, window = 5 runs, repair episode = retry
-  chain, late discovery = IU-linked), with a blinding procedure for
-  journal-mediated rating. Draft, awaiting the framework author's
-  ratification.
-- Open TODO tracking moved to GitHub Issues (#1–#17).
+- **Release reliability:** invalid support floors, evidence modes and unsupported
+  routing policies fail before execution. Existing journal paths are preserved.
+  Failed, cancelled, and budget-exhausted runs exit nonzero and release no answer.
+  `on_quality_fail = "halt"` stops on review failure; escalation remains available.
+- **Concrete approvals:** show the exact draft/tool arguments, IU identity and
+  hash. Approval edits no longer pretend to change a payload: reject and submit
+  a correction turn instead. Human rejection and abandonment are distinct;
+  actual decision input is preserved. Closing the TUI cancels unfinished work.
+- **Bounded execution:** model, tool, and approval waits respect deadlines.
+  Live calls use a separate per-completion output cap (default 4,096, configurable
+  with `GRAFFY_MAX_OUTPUT_TOKENS_<TIER>`), bounded by remaining run tokens after
+  reserving estimated prompt usage. Retry attempts share token, recorded-cost,
+  and elapsed-time budgets. Actual input token use may still overshoot the
+  estimate; live USD prices remain unavailable.
+- **Review and release provenance:** the reviewer receives the original request
+  and only source IUs consumed by the draft. Newly generated MCP facades review
+  their digest. An exact-draft pass permits the "reviewed response" label;
+  other graphs explicitly release unreviewed output. Frontend output receipts
+  follow successful write/flush; legacy unconfirmed output is never assumed delivered.
+- **Session continuity:** `run --session ID` hydrates confirmed boundary history,
+  including indexed custom journal locations. Missing sessions, corrupt history,
+  conflicting run identities and incomplete target runs fail clearly.
+  `--correction` identifies a human repair initiation.
+- **MCW recording:** automatic retries count once and remain internal attempts,
+  distinct from external repair episodes. Run success is no longer recorded as
+  proof of target-failure resolution. Historical recurrence proxies are explicitly
+  labeled under `legacy_*` metric keys.
+- **Human HRDM calibration:** pinned 0–3 anchors, HUMAN_RATER provenance,
+  complete five-exchange windows, citation validation, condition-blinded display,
+  required unratable reasons, and atomic abort. Full transcript proposals are
+  frozen and hashed; `rate --segmentation FILE` applies separately recorded
+  exchange/window/episode corrections. Open episodes have no numeric completed
+  repair-cost score. The versioned v2 adaptation remains **draft/calibration only**.
+- **Release pipeline:** named workflow, fmt/Clippy/Linux/macOS test gates before
+  publication, locked builds, tag/version match checks, offline binary smoke
+  journeys, normalized archive ownership, and alpha prerelease labeling.
+- Ratatui/CLI chat is the next feature. Desktop/web is tabled indefinitely.
+  Pricing, fine-grained claim grounding, validated MCW efficacy, model raters,
+  learned lessons, executable repair graphs and research bundles remain future work.
 
 ## v0.1.0-alpha.5 — a home, and the numbers (2026-08-30)
 

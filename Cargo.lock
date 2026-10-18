@@ -1038,6 +1038,7 @@ dependencies = [
  "graffy-proto",
  "graffy-providers",
  "graffy-tui",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -1133,6 +1134,7 @@ dependencies = [
  "async-trait",
  "graffy-core",
  "rig-core 0.42.0",
+ "tokio",
  "tracing",
 ]
 

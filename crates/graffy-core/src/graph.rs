@@ -42,6 +42,35 @@ pub struct CompiledGraph {
 impl CompiledGraph {
     /// Compile a TOML spec into an executable topology.
     pub fn compile(spec: &GraphSpec) -> Result<Self, CompileError> {
+        if crate::exec::support_floor(&spec.policy.evidence.min_level).is_none() {
+            return Err(CompileError::Invalid(format!(
+                "unknown support floor '{}'",
+                spec.policy.evidence.min_level
+            )));
+        }
+        if !matches!(spec.policy.evidence.mode.as_str(), "strict" | "trace-only") {
+            return Err(CompileError::Invalid(
+                "evidence mode must be strict or trace-only".into(),
+            ));
+        }
+        if !matches!(
+            spec.policy.routing.on_quality_fail.as_deref(),
+            None | Some("escalate") | Some("halt")
+        ) {
+            return Err(CompileError::Invalid(
+                "on_quality_fail must be escalate or halt; reroute is not implemented".into(),
+            ));
+        }
+        if spec
+            .policy
+            .budget
+            .max_usd
+            .is_some_and(|cap| !cap.is_finite() || cap < 0.0)
+        {
+            return Err(CompileError::Invalid(
+                "max_usd must be finite and nonnegative".into(),
+            ));
+        }
         if spec.nodes.is_empty() {
             return Err(CompileError::Invalid(
                 "a graph with no nodes is not lawful — check section names ([[node]], [[edge]])"

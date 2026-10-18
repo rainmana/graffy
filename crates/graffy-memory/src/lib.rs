@@ -416,6 +416,22 @@ impl Store {
         Ok(out)
     }
 
+    /// Locate a session's journals, including explicitly chosen output paths.
+    pub async fn session_journal_paths(&self, session: &str) -> Result<Vec<String>, MemoryError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT journal_path FROM runs WHERE session_id = ?1 ORDER BY started_at, run_id",
+                libsql::params![session],
+            )
+            .await?;
+        let mut paths = Vec::new();
+        while let Some(row) = rows.next().await? {
+            paths.push(row.get::<String>(0)?);
+        }
+        Ok(paths)
+    }
+
     /// Register (upsert) an MCP server binding.
     pub async fn add_mcp_server(&self, server: &McpServerRecord) -> Result<(), MemoryError> {
         self.conn

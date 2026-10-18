@@ -85,7 +85,7 @@ pub struct EvidencePolicy {
     /// hidden (e.g. a DnD campaign still keeps receipts).
     #[serde(default = "default_evidence_mode")]
     pub mode: String,
-    /// Minimum MCW evidence level (L0–L3) a claim needs to pass verify nodes.
+    /// Operational support floor (L0-L3 aliases accepted); not an MCW study evidence layer.
     #[serde(default = "default_min_level")]
     pub min_level: String,
 }
@@ -107,7 +107,8 @@ fn default_min_level() -> String {
     "L1".to_owned()
 }
 
-/// Hard resource ceilings; the executor halts the run when exceeded.
+/// Time deadlines and reported resource ceilings. Token input usage is known
+/// after calls; live USD enforcement requires pricing supplied by the invoker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BudgetPolicy {
     #[serde(default)]
@@ -125,7 +126,7 @@ pub struct RoutingPolicy {
     /// Escalation ladder of capability tiers, weakest first.
     #[serde(default)]
     pub ladder: Vec<String>,
-    /// "escalate" | "reroute" | "halt".
+    /// "escalate" | "halt". Other policies are rejected at compilation.
     #[serde(default)]
     pub on_quality_fail: Option<String>,
 }

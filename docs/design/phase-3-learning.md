@@ -1,14 +1,19 @@
 # Phase 3 design: the MCW learning loop & research instrument
 
-> Status: ACTIVE. C1 (detectors) and C5 v1 (`graffy metrics`) are shipped;
-> this doc is the map for the rest. It also serves as the **MCW coverage
-> audit**: what of the framework is implemented, what remains, and what data
-> graffy can put in front of other researchers. Companion reading:
-> `AGENT.md` (how to work on this repo), `docs/design/phase-2-mcp.md`
-> (the facade/taxonomy design), and the framework itself:
-> <https://rainmana.github.io/mcw-framework/> (W. Alec Akin, Apache-2.0).
+> Historical design baseline: 2026-08-30, updated 2026-09-04. The sections below
+> retain that research plan and are not a current implementation checklist. Current behavior
+> is documented in [architecture](../ARCHITECTURE.md) and the
+> [alpha.6 adaptation delta](../mcw/alpha6-adaptation.md).
+>
+> Alpha.6 implements whole-turn retry budgets, explicit human corrections,
+> delivered-boundary projection, human HRDM calibration and reviewed segmentation.
+> Ratings use HUMAN_RATER provenance. Retry attempts are internal, not canonical
+> episodes; repair success is not established by run success. SupportLevel is
+> separate from McwEvidenceLayer. The five repair names are schema vocabulary,
+> not executable node implementations. C3/C4, pricing, bundles and validated
+> efficacy remain future work.
 
-## 1. MCW coverage matrix (honest audit, 2026-09-04)
+## 1. Historical MCW coverage matrix (honest audit, 2026-09-04)
 
 Legend — **Schema**: typed in `src/protos/mcw.proto`. **Journaled**: emitted
 at runtime into run journals. **Acted on**: changes execution behavior.

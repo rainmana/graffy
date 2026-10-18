@@ -17,7 +17,7 @@ tags = ["builtin", "conversation", "floor"]
 # "strict" surfaces evidence artifacts in the UI; "trace-only" records them
 # but keeps them out of the interface (e.g. a DnD campaign still keeps receipts).
 mode = "strict"
-# Claims below this MCW evidence level cannot pass the verify node.
+# The draft's linked receipts must meet this operational support floor; this is not a claim-entailment proof.
 min_level = "L1"
 
 [policy.budget]
@@ -35,12 +35,12 @@ on_quality_fail = "escalate"
 [[node]]
 id = "intake"
 kind = "intake"
-description = "Decomposes the user turn into Information Units (assumptions, goals, constraints)."
+description = "Records the complete user request as one Information Unit."
 
 [[node]]
 id = "ground"
 kind = "research"
-description = "Collects evidence artifacts the draft's claims will need."
+description = "Reserved grounding slot; connect concrete tool nodes to collect external evidence."
 [node.params]
 sources = ["memory.recall", "mcp.*"]
 
@@ -62,7 +62,7 @@ detects = ["overcompression", "false_alignment"]
 [[node]]
 id = "respond"
 kind = "respond"
-description = "Delivers the verified response and records IU integration."
+description = "Prepares the reviewed response for frontend release."
 
 [[edge]]
 from = "intake"

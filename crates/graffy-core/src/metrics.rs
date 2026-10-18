@@ -87,12 +87,11 @@ pub struct RunMetrics {
     pub repairs: u64,
     pub repairs_by_op: BTreeMap<String, u64>,
     pub repair_cost_tokens: u64,
-    /// Repairs whose attempt's RUN passed verify (deprecated `successful`).
+    /// Repairs whose attempt's RUN succeeded (deprecated `successful`); not target resolution.
     pub repairs_run_passed: u64,
-    /// Repairs whose target failure was assessed for recurrence, and how
-    /// many of those were resolved (mode-recurrence proxy, Blocker G).
-    pub repairs_resolution_assessed: u64,
-    pub repairs_target_resolved: u64,
+    /// Legacy mode-recurrence proxy only; never evidence that the target IU failure was repaired.
+    pub legacy_recurrence_assessed: u64,
+    pub legacy_mode_not_repeated: u64,
     /// Evidence artifacts recorded, by OPERATIONAL support level (not
     /// the MCW Article IV ladder — see Blocker A).
     pub evidence_artifacts: u64,
@@ -158,9 +157,9 @@ impl RunMetrics {
                         m.repairs_run_passed += 1;
                     }
                     if let Some(resolved) = r.target_failure_resolved {
-                        m.repairs_resolution_assessed += 1;
+                        m.legacy_recurrence_assessed += 1;
                         if resolved {
-                            m.repairs_target_resolved += 1;
+                            m.legacy_mode_not_repeated += 1;
                         }
                     }
                     m.repair_cost_tokens += r.cost_tokens;
@@ -397,11 +396,10 @@ pub struct AggregateMetrics {
     pub repairs_run_passed: u64,
     /// Run-passed / all repairs (`null` when none ran). NOT causal efficacy.
     pub repair_run_passed_rate: Option<f64>,
-    pub repairs_resolution_assessed: u64,
-    pub repairs_target_resolved: u64,
-    /// Target-failure resolution rate over ASSESSED repairs only (`null`
-    /// when none were assessed) — the only field that speaks to efficacy.
-    pub repair_target_resolution_rate: Option<f64>,
+    pub legacy_recurrence_assessed: u64,
+    pub legacy_mode_not_repeated: u64,
+    /// Legacy same-mode non-recurrence ratio, not target resolution or causal effectiveness.
+    pub legacy_mode_nonrecurrence_rate: Option<f64>,
 }
 
 impl AggregateMetrics {
@@ -432,8 +430,8 @@ impl AggregateMetrics {
             a.failure_signals += r.failure_signals;
             a.repairs += r.repairs;
             a.repairs_run_passed += r.repairs_run_passed;
-            a.repairs_resolution_assessed += r.repairs_resolution_assessed;
-            a.repairs_target_resolved += r.repairs_target_resolved;
+            a.legacy_recurrence_assessed += r.legacy_recurrence_assessed;
+            a.legacy_mode_not_repeated += r.legacy_mode_not_repeated;
             a.repair_cost_tokens += r.repair_cost_tokens;
             a.evidence_artifacts += r.evidence_artifacts;
             a.hrdm_samples += r.hrdm_samples;
@@ -491,8 +489,8 @@ impl AggregateMetrics {
             .then(|| attempts_sum as f64 / a.groups_converged_after_retry as f64);
         a.repair_run_passed_rate =
             (a.repairs > 0).then(|| a.repairs_run_passed as f64 / a.repairs as f64);
-        a.repair_target_resolution_rate = (a.repairs_resolution_assessed > 0)
-            .then(|| a.repairs_target_resolved as f64 / a.repairs_resolution_assessed as f64);
+        a.legacy_mode_nonrecurrence_rate = (a.legacy_recurrence_assessed > 0)
+            .then(|| a.legacy_mode_not_repeated as f64 / a.legacy_recurrence_assessed as f64);
         a
     }
 }
@@ -653,8 +651,8 @@ mod tests {
             status: "succeeded".into(),
             repairs: 1,
             repairs_run_passed: 1,
-            repairs_resolution_assessed: 1,
-            repairs_target_resolved: 1,
+            legacy_recurrence_assessed: 1,
+            legacy_mode_not_repeated: 1,
             repair_cost_tokens: 40,
             ..Default::default()
         };
@@ -689,11 +687,11 @@ mod tests {
         assert_eq!(a5.groups_with_retries, 0);
         assert_eq!(a5.mean_attempts_to_converge, None);
         assert_eq!(a.repair_run_passed_rate, Some(1.0));
-        assert_eq!(a.repair_target_resolution_rate, Some(1.0));
+        assert_eq!(a.legacy_mode_nonrecurrence_rate, Some(1.0));
 
         let none = AggregateMetrics::from_rows(&[]);
         assert_eq!(
-            none.repair_target_resolution_rate, None,
+            none.legacy_mode_nonrecurrence_rate, None,
             "unassessed → null, never 0"
         );
     }

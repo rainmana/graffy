@@ -1,100 +1,84 @@
 # graffy architecture
 
-> Locked for Phase 1 on 2026-08-29. Every decision here is traceable to an ADR in `docs/adr/`.
+Current implementation: alpha.6 (2026-10-17). Decisions live in [ADRs](adr/README.md).
 
-## The one invariant
+## Runtime and ownership
 
-**Nothing executes outside a graph.** A user prompt, an imported skill, a memory recall, a
-summarization pass, a benchmark run, a DnD turn — each is compiled into a typed, budgeted,
-journaled graph before any model sees it. There is no code path from user input to a model call
-that bypasses the executor, and the provider layer deliberately exposes no "just complete this"
-function (ADR-0005).
+Nothing executes outside a graph. The Rust binary hosts CLI, Ratatui, Tokio
+execution, model/tool adapters, and embedded libSQL.
 
-## Runtime shape
-
-Single process, single binary (ADR-0001, ADR-0002). The TUI, executor, memory store, and
-providers all live in one tokio runtime — no daemons, no sidecars, no IPC. "Distribution" means
-copying one file (GitHub Actions builds macOS + Linux artifacts per tag).
-
-```
-┌──────────────────────────── graffy (one process) ────────────────────────────┐
-│                                                                              │
-│  graffy-tui (ratatui)                                                        │
-│    live run view ◄── folds ── journal stream (protobuf RunEvent frames)      │
-│    step inspector ◄─ reads ── journal + evidence store                       │
-│         │ user intents (run graph, approve node, answer survey)              │
-│         ▼                                                                    │
-│  graffy-core executor  ── petgraph topology from TOML spec                   │
-│    │ schedules nodes; enforces guards, budgets, evidence policy              │
-│    ├─► graffy-providers (rig) ── Anthropic / OpenAI(+compat) / Ollama        │
-│    ├─► graffy-agents (rigs) ──── multi-persona conversation nodes            │
-│    ├─► graffy-mcp (rmcp, P2) ─── MCP tools as nodes                          │
-│    ├─► graffy-mcw ────────────── IU ledger, detectors, repair nodes, H/R/D/M │
-│    └─► graffy-graphs ─────────── built-in templates (also plain TOML)        │
-│         │                                                                    │
-│         ▼                                                                    │
-│  graffy-memory (libSQL, embedded) ── episodic log • vectors • temporal KG    │
-│                                      sessions • journal mirror • registry    │
-└──────────────────────────────────────────────────────────────────────────────┘
+```text
+CLI / Ratatui → TOML compiler → executor → models / tools / approvals
+                                  ↓
+                           protobuf journal → replay / metrics / boundary projection
+                                  ↓
+                             libSQL indexes
 ```
 
-## Serialization split (ADR-0003)
-
-| Concern | Format | Why |
-| --- | --- | --- |
-| Graph specs (durable, shared, versioned) | **TOML** | Human-readable, diff-able, lives happily in git. `graphs/*.toml` is the interchange format. |
-| Node payloads, internal messages, run journal | **Protobuf** (prost, compiled by pure-Rust protox) | Typed, compact, evolvable, replayable. `src/protos/` is the single source of truth. |
-
-A shared graph is a TOML file (+ optional provenance); a shared *run* or *benchmark result* is
-a journal bundle of protobuf frames whose manifest pins the spec's SHA-256 — process and data
-travel together (ADR-0007).
-
-## MCW is in the type system (ADR-0004)
-
-The [Meta-Context Window Framework](https://github.com/rainmana/mcw-framework) supplies the
-coordination vocabulary, encoded in `graffy.mcw.v1`:
-
-| MCW construct | graffy representation |
+| Crate | Implemented responsibility |
 | --- | --- |
-| Information Unit (+ 5-stage lifecycle) | `InformationUnit` / `IuStageRecord` — the payload currency of edges |
-| 6 failure modes | `FailureMode` + `FailureSignal` (+ per-run `FailureModeVector` slots) |
-| 5 repair operations | `RepairOperation` + `RepairAction`, executable as `repair.*` node kinds |
-| H/R/D/M observables | `HrdmSample` / `HrdmSeries` — heuristic, model-judge, or human-survey sourced |
-| Epistemic floor | `EvidenceLevel` (L0–L3) on every claim; verify nodes enforce `policy.evidence.min_level` |
-| Constitution's "summaries preserve falsification conditions" | compaction runs as a graph whose output IUs must cover the input's guarded distinctions, or an `Overcompression` signal is raised |
+| graffy-proto | Canonical protobuf schemas compiled by protox; no system protoc |
+| graffy-core | Specs, compiler, execution traits, cancellation, journals, projection, metrics |
+| graffy-providers | rig-backed tier bindings; no pricing tables |
+| graffy-mcp | rmcp stdio discovery/interview, facade generation and tool receipts |
+| graffy-graphs | Four built-ins and fixed-floor graphification |
+| graffy-memory | Graph/MCP registries, session/run indexes, journal mirror |
+| graffy-tui | Live/replay inspection, graphify review, exact-payload approvals |
+| graffy-mcw | Type exports and repair names, no executable repair registry |
+| graffy-agents / graffy-evals | Scaffolds, no active persona/evaluation runner |
+| graffy root | CLI orchestration, retries, continuation, delivery receipts, human ratings |
 
-## Crate map
+Core traits define the execution doorways; adapters depend on core. The executor
+is serial, not a general parallel branch/join scheduler. Replay inspects records;
+it does not resume or re-execute. Chat will use this path per turn
+([ADR-0010](adr/0010-chat-through-graphs.md)); desktop/web is tabled indefinitely.
 
-| Crate | Owns | Phase |
-| --- | --- | --- |
-| `graffy-proto` | Generated protobuf types (MCW + journal) | 0 ✅ |
-| `graffy-core` | Spec parsing, cycle-guard compiler, executor, journal | 0 partial → 1 |
-| `graffy-providers` | rig-backed model access + capability/cost registry for routing | 1 |
-| `graffy-agents` | rigs-backed multi-persona conversation nodes | 1–2 |
-| `graffy-mcw` | IU ledger, failure detectors, repair nodes, H/R/D/M sampling | 1 schema → 3 live |
-| `graffy-memory` | Embedded libSQL: episodic log, vectors, temporal KG, sessions, registry | 1 schema → 3 |
-| `graffy-graphs` | Built-in graph templates (TOML, unprivileged) | 1 seed → 2 catalog |
-| `graffy-mcp` | rmcp client; MCP tools as nodes; later graffy-as-MCP-server | 2 |
-| `graffy-evals` | Benchmarks, surveys, portable eval bundles | 4 |
-| `graffy-tui` | Live run view, step inspector, novice mode | 1 |
-| `graffy` (root) | The single binary: CLI + TUI entry | 0 ✅ |
+## Execution and release
 
-## Smart routing (ADR-0005)
+Specs are TOML; journals contain length-delimited protobuf frames with run and
+sequence identity. Journal creation is exclusive. Manifests pin the spec hash;
+they do not embed the full TOML. Portable research bundles remain future work.
 
-Specs request capability *tiers* (`model_tier = "balanced"`); the provider registry resolves
-tiers to concrete models with cost metadata. `policy.routing.ladder` orders tiers weakest-first;
-when a verify/review node rejects content, the executor consults `on_quality_fail`:
+Only successful runs release an answer. The frontend writes and flushes output
+before appending its delivery receipt. Projection merges that receipt with the
+released candidate, counts confirmed exchanges, and separates internal retries.
+Legacy unconfirmed output stays unknown. Delivery does not prove attention or
+understanding. See [ADR-0011](adr/0011-release-and-boundary-receipts.md).
 
-- `escalate` — re-dispatch to the next tier up (or a designated local fine-tune), never
-  silently back to the producer;
-- `reroute` — same tier, different provider;
-- `halt` — stop and ask the human.
+Approval exposes the exact payload and hash. Edits require rejection and a new
+correction turn. Human decisions differ from abandonment and automatic approval.
+A review pass applies only to the exact draft IU. New MCP facades run intake →
+prepare → [approve] → invoke → digest → verify → respond. Revisions repeat
+digest/review, not the tool effect. Stored facades are not silently upgraded.
 
-Every decision is journaled as a `RoutingDecision` — routing is inspectable, not folklore.
+## Policies and limits
 
-## Evidence policy (ADR-0008)
+Routing tiers resolve through environment bindings. `escalate` advances eligible
+successors after review failure; `halt` stops. Unsupported policies fail compilation.
+Different tiers can still resolve to the same provider/model.
 
-Claims carry evidence artifacts (hash-addressed) with `EvidenceLevel` tags. Verify nodes block
-propagation of claims below the graph's `min_level`. `mode = "strict"` surfaces receipts in the
-UI; `mode = "trace-only"` keeps them journal-only (the DnD-campaign case) — but they must exist
-either way. Model inference alone is L0 and can never satisfy an L1+ floor.
+Deadlines interrupt model, tool and approval waits. Retries share remaining tokens,
+recorded USD cost and time. Providers apply a separate per-call output cap (4,096
+by default, configurable per tier) bounded by the remaining aggregate allowance
+after a conservative input reserve. No model-limit discovery or exact tokenizer
+is implemented; reported usage can still overshoot the estimate. Live prices
+remain unavailable, so USD ceilings cannot enforce actual spend. Cancellation
+cannot roll back external effects. See ADR-0011 for the reserve policy.
+
+Operational `SupportLevel` is separate from study-level `McwEvidenceLayer`.
+Verification first checks receipts and support, then asks the configured reviewer
+about the original request, draft and consumed source IUs. That provider may differ
+from the drafter. This is lineage plus judgment, not deterministic claim entailment.
+The generic research slot is a no-op. Intake records one whole-prompt IU.
+
+## MCW measurement boundary
+
+Failure labels are uncalibrated hypotheses with source artifacts. Assigned salience
+is labeled; unobserved five-stage fidelity is absent. Internal repairs record cost
+and run-passed outcomes, not demonstrated target resolution. Human HRDM collection
+uses confirmed boundary units with frozen proposals and separately recorded
+corrections. The [v2 adaptation](mcw/alpha6-adaptation.md) remains draft/calibration only.
+
+Learned lessons, model raters, executable repair graphs, fine-grained IU/claim
+grounding, FTS/vectors/temporal recall, compaction, pricing and research bundles
+remain future work.

@@ -37,6 +37,9 @@ pub enum BoundaryRole {
     ApprovalDecision,
     /// The verified response actually shown to the human.
     VerifiedResponse,
+    /// Delivered output without a passing review of that exact draft.
+    Response,
+    Unknown,
 }
 
 /// Whether the content provably crossed the human/AI boundary.
@@ -121,7 +124,7 @@ pub struct BoundaryProjection {
     pub blinding_profile: &'static str,
 }
 
-pub const BLINDING_PROFILE: &str = "boundary-v1";
+pub const BLINDING_PROFILE: &str = "boundary-v2";
 
 /// Order a session's runs by validated manifest timestamps (falling back to
 /// the first event's timestamp), tie-broken deterministically by run id —
@@ -259,11 +262,11 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                         response_candidate = Some(BoundaryTurn {
                             actor: BoundaryActor::Ai,
                             attempt_group_id: group.clone(),
-                            role: BoundaryRole::VerifiedResponse,
+                            role: BoundaryRole::Response,
                             content: iu.payload_text.clone(),
                             at: iu.created_at,
                             refs: vec![format!("journal://{}/{}", frame.run_id, frame.seq)],
-                            visibility: Visibility::Visible,
+                            visibility: Visibility::Unknown,
                         });
                     }
                 }
@@ -285,7 +288,7 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                         ),
                         at: a.decided_at,
                         refs: vec![format!("journal://{}/{}", frame.run_id, frame.seq)],
-                        visibility: Visibility::Visible,
+                        visibility: Visibility::Unknown,
                     });
                 }
                 Some(Event::BoundaryEvent(b)) => {
@@ -305,7 +308,9 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                             "correction" => BoundaryRole::Correction,
                             "approval_question" => BoundaryRole::ApprovalQuestion,
                             "approval_decision" => BoundaryRole::ApprovalDecision,
-                            _ => BoundaryRole::VerifiedResponse,
+                            "verified_response" => BoundaryRole::VerifiedResponse,
+                            "response" => BoundaryRole::Response,
+                            _ => BoundaryRole::Unknown,
                         },
                         content: b.content.clone(),
                         at: frame.at,
@@ -314,7 +319,19 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                         } else {
                             b.source_ref.clone()
                         }],
-                        visibility: if b.visibility == "visible" {
+                        visibility: if (b.visibility == "delivered"
+                            || (b.visibility == "visible"
+                                && !matches!(b.role.as_str(), "response" | "verified_response")))
+                            && matches!(b.actor.as_str(), "human" | "ai")
+                            && matches!(
+                                b.role.as_str(),
+                                "prompt"
+                                    | "correction"
+                                    | "approval_question"
+                                    | "approval_decision"
+                                    | "verified_response"
+                                    | "response"
+                            ) {
                             Visibility::Visible
                         } else {
                             Visibility::Unknown
@@ -335,7 +352,28 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
             // Explicit path: the journal already says what crossed. Dedup is
             // still scoped to the attempt group (retries re-emit the prompt).
             for cand in explicit_turns {
+                if cand.actor == BoundaryActor::Ai
+                    && matches!(
+                        cand.role,
+                        BoundaryRole::Response | BoundaryRole::VerifiedResponse
+                    )
+                    && let Some(existing) = p.turns.iter_mut().find(|t| {
+                        t.actor == cand.actor
+                            && t.role == cand.role
+                            && t.attempt_group_id == cand.attempt_group_id
+                            && t.refs == cand.refs
+                            && t.content == cand.content
+                    })
+                {
+                    // A delivery receipt upgrades this released candidate, not a second turn.
+                    if cand.visibility == Visibility::Visible {
+                        existing.visibility = Visibility::Visible;
+                        existing.at = cand.at;
+                    }
+                    continue;
+                }
                 if cand.actor == BoundaryActor::Human
+                    && matches!(cand.role, BoundaryRole::Prompt | BoundaryRole::Correction)
                     && let Some(existing) = p.turns.iter_mut().find(|t| {
                         t.actor == BoundaryActor::Human
                             && t.role == cand.role
@@ -348,10 +386,7 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                     p.turns.push(cand);
                 }
             }
-            if had_retry_feedback {
-                p.internal.retry_runs += 1;
-            }
-            if !run_succeeded {
+            if !events.iter().any(|e| matches!(&e.event, Some(Event::BoundaryEvent(b)) if b.role == "verified_response" && b.visibility == "delivered")) {
                 p.internal.runs_without_verified_response += 1;
             }
             continue;
@@ -370,12 +405,11 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
                 p.turns.push(cand);
             }
         }
-        // The AI's contribution crossed the boundary only if a verified
-        // response was actually produced (shown to the human). Failed
-        // attempts contribute no AI boundary turn — and are not exchanges.
-        match (run_succeeded, response_candidate) {
-            (true, Some(resp)) => p.turns.push(resp),
-            _ => p.internal.runs_without_verified_response += 1,
+        // Legacy output has no delivery receipt. Preserve it with unknown visibility;
+        // it cannot establish an exchange or enter continuation context.
+        p.internal.runs_without_verified_response += 1;
+        if let (true, Some(resp)) = (run_succeeded, response_candidate) {
+            p.turns.push(resp);
         }
     }
 
@@ -383,6 +417,10 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
     // either direction (Human→AI prompt/response, AI→Human question/decision).
     let mut pending: Option<usize> = None;
     for (idx, turn) in p.turns.iter().enumerate() {
+        if turn.visibility != Visibility::Visible {
+            pending = None;
+            continue;
+        }
         match pending {
             Some(prev) if p.turns[prev].actor != turn.actor => {
                 let (h, a) = if p.turns[prev].actor == BoundaryActor::Human {
@@ -412,7 +450,10 @@ pub fn project(runs: &[Vec<wire::RunEvent>]) -> BoundaryProjection {
     // closed at the first later completed exchange whose human turn is not
     // itself another correction (v1 closure proxy — the rater confirms).
     for (idx, turn) in p.turns.iter().enumerate() {
-        if turn.actor == BoundaryActor::Human && turn.role == BoundaryRole::Correction {
+        if turn.visibility == Visibility::Visible
+            && turn.actor == BoundaryActor::Human
+            && turn.role == BoundaryRole::Correction
+        {
             // Closure requires evidence of PROCEEDING: a later completed
             // exchange whose human turn is not itself a correction. A
             // session ending at/after the correction leaves the episode
@@ -441,7 +482,6 @@ pub fn r_ev(confirmed_episodes: usize, exchanges: usize) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn ev(run: &str, seq: u64, event: Event) -> wire::RunEvent {
         wire::RunEvent {
@@ -468,14 +508,11 @@ mod tests {
     }
 
     fn human_goal(text: &str) -> Event {
-        Event::IuRecorded(mcw::InformationUnit {
-            id: format!("iu_{text}"),
-            kind: mcw::IuKind::Goal as i32,
-            payload_text: text.to_owned(),
-            source: Some(mcw::ActorRef {
-                kind: mcw::actor_ref::ActorKind::Human as i32,
-                ..Default::default()
-            }),
+        Event::BoundaryEvent(wire::BoundaryEventRecord {
+            actor: "human".into(),
+            role: "prompt".into(),
+            content: text.into(),
+            visibility: "visible".into(),
             ..Default::default()
         })
     }
@@ -493,24 +530,21 @@ mod tests {
     }
 
     fn human_correction(text: &str) -> Event {
-        Event::IuRecorded(mcw::InformationUnit {
-            kind: mcw::IuKind::Correction as i32,
-            payload_text: text.to_owned(),
-            source: Some(mcw::ActorRef {
-                kind: mcw::actor_ref::ActorKind::Human as i32,
-                ..Default::default()
-            }),
+        Event::BoundaryEvent(wire::BoundaryEventRecord {
+            actor: "human".into(),
+            role: "correction".into(),
+            content: text.into(),
+            visibility: "visible".into(),
             ..Default::default()
         })
     }
 
     fn response(text: &str) -> Event {
-        let mut attributes = HashMap::new();
-        attributes.insert("role".to_owned(), "response".to_owned());
-        Event::IuRecorded(mcw::InformationUnit {
-            kind: mcw::IuKind::Other as i32,
-            payload_text: text.to_owned(),
-            attributes,
+        Event::BoundaryEvent(wire::BoundaryEventRecord {
+            actor: "ai".into(),
+            role: "verified_response".into(),
+            content: text.into(),
+            visibility: "delivered".into(),
             ..Default::default()
         })
     }
@@ -726,7 +760,12 @@ mod tests {
                 actor: actor.to_owned(),
                 role: role.to_owned(),
                 content: content.to_owned(),
-                visibility: "visible".to_owned(),
+                visibility: if role == "verified_response" {
+                    "delivered"
+                } else {
+                    "visible"
+                }
+                .to_owned(),
                 attempt_group_id: group.to_owned(),
                 source_ref: format!("journal://{run}/{seq}"),
             }),
