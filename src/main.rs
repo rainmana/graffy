@@ -118,6 +118,10 @@ enum Command {
         /// Resume an existing session instead of starting a new one.
         #[arg(long)]
         session: Option<String>,
+        /// Use the Ratatui conversation view (composer, transcript, inline
+        /// approvals, run details) instead of the plain line-based chat.
+        #[arg(long)]
+        tui: bool,
     },
     /// Replay a run journal: fold the event stream into a summary.
     Replay {
@@ -220,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
         &cli.command,
         None | Some(Command::Tui)
             | Some(Command::Run { tui: true, .. })
+            | Some(Command::Chat { tui: true, .. })
             | Some(Command::Replay { tui: true, .. })
     );
     let default_filter = match cli.verbose {
@@ -269,7 +274,8 @@ async fn main() -> anyhow::Result<()> {
             offline,
             retry,
             session,
-        } => chat(graph, offline, retry, session).await,
+            tui,
+        } => chat(graph, offline, retry, session, tui).await,
         Command::Replay {
             journal,
             tui,
@@ -693,25 +699,28 @@ fn max_attempts_from(retry: Option<&str>) -> anyhow::Result<u32> {
 /// Visible boundary history of an existing session, for model context.
 /// Unknown sessions and unreadable history fail loudly — never "empty".
 async fn hydrate_history(session: &str) -> anyhow::Result<Vec<(String, String)>> {
-    Ok(session_history(session).await?.0)
+    let history = session_history(session).await?;
+    if history.2 {
+        eprintln!("warning: {UNCONFIRMED_HISTORY}");
+    }
+    Ok(history.0)
 }
 
-/// Visible history plus the id of the graph the session's latest run used.
-async fn session_history(session: &str) -> anyhow::Result<(Vec<(String, String)>, String)> {
+const UNCONFIRMED_HISTORY: &str =
+    "history includes unconfirmed delivery; those contributions are excluded from model context";
+
+/// Visible history, the id of the graph the session's latest run used, and
+/// whether some history was excluded because its delivery is unconfirmed.
+async fn session_history(session: &str) -> anyhow::Result<(Vec<(String, String)>, String, bool)> {
     let runs = load_session_runs(&runs_dir(), session).await?;
     if runs.is_empty() {
         anyhow::bail!("unknown session '{session}'; omit --session to start a new conversation");
     }
     let projection = graffy_core::boundary::project(&runs);
-    if projection
+    let unconfirmed = projection
         .turns
         .iter()
-        .any(|t| t.visibility != graffy_core::boundary::Visibility::Visible)
-    {
-        eprintln!(
-            "warning: history includes unconfirmed delivery; those contributions are excluded from model context"
-        );
-    }
+        .any(|t| t.visibility != graffy_core::boundary::Visibility::Visible);
     let last_graph = runs
         .last()
         .and_then(|events| {
@@ -724,6 +733,7 @@ async fn session_history(session: &str) -> anyhow::Result<(Vec<(String, String)>
     Ok((
         graffy_core::boundary::hydration_from(&projection),
         last_graph,
+        unconfirmed,
     ))
 }
 
@@ -811,9 +821,13 @@ async fn chat(
     offline: bool,
     retry: Option<String>,
     mut session: Option<String>,
+    tui: bool,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use std::io::{IsTerminal, Write};
+    if tui && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        anyhow::bail!("chat --tui needs a terminal; plain `graffy chat` works with piped input");
+    }
     let resumed = match &session {
         Some(id) => Some(session_history(id).await?),
         None => None,
@@ -822,7 +836,7 @@ async fn chat(
     // using — silently swapping graphs could drop that graph's approval gate.
     let graph_arg = match (&graph, &resumed) {
         (Some(pinned), _) => pinned.clone(),
-        (None, Some((_, session_graph))) => session_graph.clone(),
+        (None, Some((_, session_graph, _))) => session_graph.clone(),
         (None, None) => "graffy.builtin.conversation".to_owned(),
     };
     let spec_text = resolve_spec(&graph_arg).await.with_context(|| {
@@ -833,7 +847,10 @@ async fn chat(
     let spec = GraphSpec::from_toml_str(&spec_text)?;
     graffy_core::graph::CompiledGraph::compile(&spec)?;
     let max_attempts = max_attempts_from(retry.as_deref())?;
-    if let Some((history, session_graph)) = &resumed {
+    if let Some((history, session_graph, unconfirmed)) = &resumed {
+        if *unconfirmed {
+            eprintln!("warning: {UNCONFIRMED_HISTORY}");
+        }
         if session_graph != &spec.graph.id {
             eprintln!(
                 "note: this session last ran on graph '{session_graph}'; continuing on '{}' because --graph pins it",
@@ -841,12 +858,35 @@ async fn chat(
             );
         }
         // Resuming restores the recorded transcript; it re-executes nothing.
-        for (actor, content) in history {
-            println!("{actor}> {content}");
+        if !tui {
+            for (actor, content) in history {
+                println!("{actor}> {content}");
+            }
         }
     }
     let invoker = build_invoker(offline);
     let tools = connect_tools(&spec).await?;
+    if tui {
+        let history = resumed.map(|r| r.0).unwrap_or_default();
+        let session = chat_tui(
+            spec,
+            spec_text,
+            max_attempts,
+            invoker,
+            tools,
+            history,
+            session,
+        )
+        .await?;
+        if let Some(id) = session {
+            let pin = graph
+                .as_ref()
+                .map(|g| format!(" --graph \"{g}\""))
+                .unwrap_or_default();
+            println!("resume this chat: graffy chat --tui --session {id}{pin}");
+        }
+        return Ok(());
+    }
     println!(
         "graffy chat — graph '{}' v{}. Every message runs as a journaled graph.\n\
          /correct <text> sends a correction · /quit or end-of-input leaves · Ctrl-C stops the current turn",
@@ -2283,6 +2323,127 @@ impl ApprovalHandler for CliApprovalHandler {
         });
         receive.await.unwrap_or(ApprovalOutcome::Abandoned)
     }
+}
+
+/// `graffy chat --tui`: the Ratatui conversation view over the same turn
+/// runner. Returns the session to resume, if any turn ran.
+async fn chat_tui(
+    spec: GraphSpec,
+    spec_text: String,
+    max_attempts: u32,
+    invoker: Arc<dyn ModelInvoker>,
+    tools: Option<Arc<dyn ToolInvoker>>,
+    history: Vec<(String, String)>,
+    session: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    let current = Arc::new(std::sync::Mutex::new(session.clone()));
+    let for_turns = current.clone();
+    let for_reset = current.clone();
+    let view_spec = spec.clone();
+    graffy_tui::run_chat(
+        &view_spec,
+        history,
+        session,
+        move |turn: graffy_tui::ChatTurn, tap, approvals, cancellation| {
+            let (spec, spec_text) = (spec.clone(), spec_text.clone());
+            let (invoker, tools, current) = (invoker.clone(), tools.clone(), for_turns.clone());
+            async move {
+                let mut reply = graffy_tui::ChatReply::default();
+                let session = current.lock().unwrap().clone();
+                if turn.correction && session.is_none() {
+                    reply
+                        .notices
+                        .push("nothing to correct yet: /correct needs an earlier turn".into());
+                    return Ok(reply);
+                }
+                let prior_boundary = match &session {
+                    Some(id) => {
+                        let (history, _, unconfirmed) = session_history(id).await?;
+                        if unconfirmed {
+                            reply.notices.push(UNCONFIRMED_HISTORY.into());
+                        }
+                        history
+                    }
+                    None => Vec::new(),
+                };
+                let mut runner = turn::TurnRunner::new(turn::Turn {
+                    spec: spec.clone(),
+                    spec_text: spec_text.clone(),
+                    prompt: turn.prompt,
+                    correction: turn.correction,
+                    session,
+                    prior_boundary,
+                    max_attempts,
+                    journal: None,
+                    runs_dir: runs_dir(),
+                    started: std::time::Instant::now(),
+                    invoker,
+                    tools,
+                    approvals,
+                    cancellation,
+                    event_tap: Some(tap),
+                });
+                // Same attempt loop as plain chat; notes instead of prints.
+                let released = loop {
+                    let outcome = match runner.attempt(|_, _| {}).await {
+                        Ok(outcome) => outcome,
+                        Err(err) => break Err(err),
+                    };
+                    let verdict = runner.verdict(&outcome);
+                    if matches!(verdict, Ok(turn::Verdict::Released)) {
+                        break Ok(outcome);
+                    }
+                    // An attempt that released nothing is indexed right away.
+                    if let Err(err) = index_run(&spec, &spec_text, &outcome).await {
+                        reply.notices.push(format!(
+                            "indexing failed ({err}); journal remains canonical"
+                        ));
+                    }
+                    reply.notices.extend(outcome.notes.iter().cloned());
+                    reply.notices.push(format!(
+                        "attempt {} ended {:?} — details: graffy replay \"{}\" --tui",
+                        runner.attempt_number(),
+                        outcome.status,
+                        outcome.journal_path.display()
+                    ));
+                    if let Err(err) = verdict {
+                        break Err(err);
+                    }
+                    reply
+                        .notices
+                        .push("retrying with recorded review feedback".into());
+                };
+                if let Some(id) = runner.session_id() {
+                    *current.lock().unwrap() = Some(id.to_owned());
+                    reply.session = Some(id.to_owned());
+                }
+                match released {
+                    Ok(outcome) => {
+                        reply.answer = JournalWriter::undelivered_response(
+                            &outcome.journal_path,
+                            &outcome.run_id,
+                        )?
+                        .map(|(label, content)| (label.to_owned(), content));
+                        // Receipt first, then the index mirror, once the view
+                        // has drawn the answer.
+                        reply.confirm_shown = Some(Box::pin(async move {
+                            JournalWriter::confirm_delivery(
+                                &outcome.journal_path,
+                                &outcome.run_id,
+                            )?;
+                            index_run(&spec, &spec_text, &outcome).await?;
+                            Ok(())
+                        }));
+                    }
+                    Err(err) => reply.notices.push(format!("{err}")),
+                }
+                Ok(reply)
+            }
+        },
+        move || *for_reset.lock().unwrap() = None,
+    )
+    .await?;
+    Ok(current.lock().unwrap().clone())
 }
 
 /// Approvals for piped `graffy chat`: every stdin line is a conversation

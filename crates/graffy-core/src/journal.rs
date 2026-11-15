@@ -64,13 +64,12 @@ impl JournalWriter {
         })
     }
 
-    /// Append an output receipt only after the frontend successfully writes and
-    /// flushes the released answer. A single frontend owns delivery for each run.
-    pub fn deliver_response<W: std::io::Write>(
+    /// The released response of a successful run that has no output receipt
+    /// yet, with the sequence number of the journal's last frame.
+    fn undelivered(
         path: &Path,
         run_id: &str,
-        output: &mut W,
-    ) -> Result<(), JournalError> {
+    ) -> Result<Option<(wire::BoundaryEventRecord, u64)>, JournalError> {
         let events = JournalReader::read_all(path)?;
         let invalid = || {
             std::io::Error::new(
@@ -86,7 +85,7 @@ impl JournalWriter {
         {
             return Err(invalid().into());
         }
-        let mut released = events
+        let released = events
             .iter()
             .find_map(|e| match &e.event {
                 Some(Event::BoundaryEvent(b)) if b.actor == "ai" && b.visibility == "released" => {
@@ -99,29 +98,62 @@ impl JournalWriter {
             matches!(&e.event, Some(Event::BoundaryEvent(b))
             if b.visibility == "delivered" && b.source_ref == released.source_ref)
         }) {
-            return Ok(());
+            return Ok(None);
         }
-        let label = if released.role == "verified_response" {
-            "reviewed response"
-        } else {
-            "response (not model-reviewed)"
+        Ok(Some((released, events.last().map_or(0, |e| e.seq))))
+    }
+
+    /// The honest label and content of a released response not yet shown to
+    /// the human. `None` once a receipt exists. Frontends that render rather
+    /// than write (the TUI) show this, then call [`Self::confirm_delivery`].
+    pub fn undelivered_response(
+        path: &Path,
+        run_id: &str,
+    ) -> Result<Option<(&'static str, String)>, JournalError> {
+        Ok(Self::undelivered(path, run_id)?.map(|(released, _)| {
+            let label = if released.role == "verified_response" {
+                "reviewed response"
+            } else {
+                "response (not model-reviewed)"
+            };
+            (label, released.content)
+        }))
+    }
+
+    /// Append the output receipt. Call only after the released answer has
+    /// actually been shown. A single frontend owns delivery for each run.
+    pub fn confirm_delivery(path: &Path, run_id: &str) -> Result<(), JournalError> {
+        let Some((mut released, seq)) = Self::undelivered(path, run_id)? else {
+            return Ok(());
         };
-        writeln!(
-            output,
-            "\n================ {label} ================\n{}",
-            released.content
-        )?;
-        output.flush()?;
         released.visibility = "delivered".into();
         let mut writer = Self {
             out: BufWriter::new(OpenOptions::new().append(true).open(path)?),
             path: path.to_path_buf(),
             run_id: run_id.to_owned(),
-            seq: events.last().map_or(0, |e| e.seq),
+            seq,
             tap: None,
         };
         writer.append(Event::BoundaryEvent(released))?;
         Ok(())
+    }
+
+    /// Append an output receipt only after the frontend successfully writes and
+    /// flushes the released answer. A single frontend owns delivery for each run.
+    pub fn deliver_response<W: std::io::Write>(
+        path: &Path,
+        run_id: &str,
+        output: &mut W,
+    ) -> Result<(), JournalError> {
+        let Some((label, content)) = Self::undelivered_response(path, run_id)? else {
+            return Ok(());
+        };
+        writeln!(
+            output,
+            "\n================ {label} ================\n{content}"
+        )?;
+        output.flush()?;
+        Self::confirm_delivery(path, run_id)
     }
 
     /// Append one event; returns the assigned sequence number.

@@ -21,6 +21,17 @@
   approval gate is abandoned and nothing is released. A resumed chat stays on the
   session's own graph unless `--graph` pins another (which is announced), and the
   printed resume command repeats an explicit pin.
+- **`graffy chat --tui` (ADR-0010 step 3):** a Ratatui conversation view on the
+  same turn runner — composer, scrollable transcript, one active turn at a time,
+  plain-language progress, inline approvals, `/new` and `/correct`, and Tab for
+  read-only run details (the existing step inspector). An answer's output receipt
+  is recorded only after the frame showing it has been drawn
+  (`JournalWriter::undelivered_response` / `confirm_delivery`). Pressing Enter
+  while a turn runs keeps the draft instead of sending it (an idea from
+  @rainmana's friendo). In chat, approvals take deliberate chords — Ctrl-A
+  approve, Ctrl-R reject — so text typed as a prompt appears can never decide a
+  gate. Recorded text is stripped of control characters before rendering. Paste
+  keeps newlines. Ctrl-C stops the running turn, or leaves when idle.
 - **TUI logging:** default log output is off while a TUI owns the screen (log
   lines were being drawn over the live view); `-v` or `RUST_LOG` still enables it.
 
