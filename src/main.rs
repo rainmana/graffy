@@ -4,6 +4,7 @@
 //! inspectable, durable, shareable agent graph. See docs/ARCHITECTURE.md.
 
 mod rating;
+mod turn;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,9 +12,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 
 use graffy_core::exec::ToolInvoker;
-use graffy_core::exec::{
-    ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, OfflineEcho, RunInput, RunOutcome,
-};
+use graffy_core::exec::{ApprovalHandler, ApprovalOutcome, ModelInvoker, OfflineEcho, RunOutcome};
 use graffy_core::journal::{JournalReader, JournalWriter, event_kind, summarize, wire};
 use graffy_core::spec::GraphSpec;
 use graffy_mcp::{LiveServer, RegistryToolInvoker, ServerBinding};
@@ -101,6 +100,24 @@ enum Command {
         /// Declare this follow-up as a human correction (requires --session).
         #[arg(long)]
         correction: bool,
+    },
+    /// Chat in the terminal. Every line you send still runs as a compiled,
+    /// journaled graph (ADR-0010); one session carries the conversation.
+    Chat {
+        /// Graph each turn runs on: a TOML path or a registered graph id.
+        /// Default: the session's own graph when resuming, otherwise the
+        /// built-in conversation graph.
+        #[arg(long)]
+        graph: Option<String>,
+        /// Deterministic offline echo invoker (no model, no network).
+        #[arg(long)]
+        offline: bool,
+        /// Extra automatic attempts per turn: a number, or 'auto' (3).
+        #[arg(long)]
+        retry: Option<String>,
+        /// Resume an existing session instead of starting a new one.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Replay a run journal: fold the event stream into a summary.
     Replay {
@@ -199,7 +216,17 @@ enum GraphCommand {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let tui_active = matches!(
+        &cli.command,
+        None | Some(Command::Tui)
+            | Some(Command::Run { tui: true, .. })
+            | Some(Command::Replay { tui: true, .. })
+    );
     let default_filter = match cli.verbose {
+        // Log lines written over a live TUI corrupt it; the journal is the record.
+        0 if tui_active => "off",
+        // Chat prints its own step progress; raw log lines would bury the conversation.
+        0 if matches!(&cli.command, Some(Command::Chat { .. })) => "warn",
         0 => "info",
         1 => "debug",
         _ => "trace",
@@ -237,6 +264,12 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
+        Command::Chat {
+            graph,
+            offline,
+            retry,
+            session,
+        } => chat(graph, offline, retry, session).await,
         Command::Replay {
             journal,
             tui,
@@ -569,17 +602,8 @@ async fn run_graph(
     let spec = GraphSpec::from_toml_str(&spec_text)?;
     // Validate before starting any provider or MCP transport.
     graffy_core::graph::CompiledGraph::compile(&spec)?;
-    let retries = match retry.as_deref() {
-        None => 0,
-        Some("auto") => DEFAULT_AUTO_RETRIES,
-        Some(n) => n
-            .parse::<u32>()
-            .map_err(|_| anyhow::anyhow!("--retry takes a number or 'auto', got '{n}'"))?,
-    };
-    let max_attempts = retries
-        .checked_add(1)
-        .ok_or_else(|| anyhow::anyhow!("--retry is too large"))?;
-    if tui && (retries > 0 || session.is_some() || correction) {
+    let max_attempts = max_attempts_from(retry.as_deref())?;
+    if tui && (max_attempts > 1 || session.is_some() || correction) {
         anyhow::bail!("--retry, --session and --correction require plain CLI mode in alpha.6");
     }
     if correction && session.is_none() {
@@ -590,207 +614,413 @@ async fn run_graph(
             "journal already exists; choose a new path (existing journals are never overwritten)"
         );
     }
-    let continuing_session = session.is_some();
     let prior_boundary = match &session {
-        Some(id) => {
-            let runs = load_session_runs(&runs_dir(), id).await?;
-            if runs.is_empty() {
-                anyhow::bail!("unknown session '{id}'; omit --session to start a new conversation");
-            }
-            let projection = graffy_core::boundary::project(&runs);
-            if projection
-                .turns
-                .iter()
-                .any(|t| t.visibility != graffy_core::boundary::Visibility::Visible)
-            {
-                eprintln!(
-                    "warning: history includes unconfirmed delivery; those contributions are excluded from model context"
-                );
-            }
-            graffy_core::boundary::hydration_from(&projection)
-        }
+        Some(id) => hydrate_history(id).await?,
         None => Vec::new(),
     };
     let invoker = build_invoker(offline);
     let turn_started = std::time::Instant::now();
-    let tool_plane = if let Some(seconds) = spec.policy.budget.max_seconds {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(seconds),
-            build_tool_plane(&spec),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("run deadline exhausted while connecting tools"))??
-    } else {
-        build_tool_plane(&spec).await?
+    let tool_plane = connect_tools(&spec).await?;
+    let cancellation = graffy_core::control::Cancellation::default();
+    // Both frontends drive the same runner (ADR-0010): only rendering differs.
+    let turn = turn::Turn {
+        spec: spec.clone(),
+        spec_text: spec_text.clone(),
+        prompt,
+        correction,
+        session,
+        prior_boundary,
+        max_attempts,
+        journal,
+        runs_dir: runs_dir(),
+        started: turn_started,
+        invoker,
+        tools: tool_plane,
+        approvals: Arc::new(CliApprovalHandler),
+        cancellation: cancellation.clone(),
+        event_tap: None,
     };
     if tui {
-        let path =
-            journal.unwrap_or_else(|| runs_dir().join(format!("{}.journal", ulid_like_stamp())));
-        let outcome = graffy_tui::run_live(
-            spec.clone(),
-            spec_text.clone(),
-            prompt,
-            path,
-            invoker,
-            tool_plane,
-            graffy_core::control::RemainingBudget {
-                duration: spec.policy.budget.max_seconds.map(|seconds| {
-                    std::time::Duration::from_secs(seconds).saturating_sub(turn_started.elapsed())
-                }),
-                ..Default::default()
-            },
-        )
+        let outcome = graffy_tui::run_live(&spec, move |tap, approvals, cancellation| async move {
+            turn::TurnRunner::new(turn::Turn {
+                event_tap: Some(tap),
+                approvals,
+                cancellation,
+                ..turn
+            })
+            .attempt(|_, _| {})
+            .await
+        })
         .await?
         .ok_or_else(|| anyhow::anyhow!("run failed; see the journal"))?;
-        let status = outcome.status;
-        report_outcome(&spec, &spec_text, outcome).await?;
-        if status != wire::RunStatus::Succeeded {
-            anyhow::bail!("run ended {status:?}");
+        report_outcome(&spec, &spec_text, &outcome, false).await?;
+        if outcome.status != wire::RunStatus::Succeeded {
+            anyhow::bail!("run ended {:?}", outcome.status);
         }
         return Ok(());
     }
-    let cancellation = graffy_core::control::Cancellation::default();
     let cancel_on_signal = cancellation.clone();
     let signal_task = tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             cancel_on_signal.cancel();
         }
     });
-    let result = async {
-        let mut session_id = session;
-        let mut feedback = Vec::new();
-        let mut attempt_group = None;
-        let mut prior_run_id = None;
-        let mut tokens_spent = 0u64;
-        let mut usd_spent = 0.0f64;
-        for attempt in 1..=max_attempts {
-            let remaining = graffy_core::control::RemainingBudget {
-                tokens: spec.policy.budget.max_tokens.map(|cap| cap.saturating_sub(tokens_spent)),
-                usd: spec.policy.budget.max_usd.map(|cap| (cap - usd_spent).max(0.0)),
-                duration: spec.policy.budget.max_seconds.map(|seconds|
-                    std::time::Duration::from_secs(seconds).saturating_sub(turn_started.elapsed())),
-            };
-            if remaining.tokens == Some(0) || remaining.usd == Some(0.0)
-                || remaining.duration.is_some_and(|d| d.is_zero()) {
-                anyhow::bail!("whole-turn budget exhausted; no further attempt started");
-            }
-            let path = match (&journal, attempt) {
-                (Some(path), 1) => path.clone(),
-                _ => runs_dir().join(format!("{}.journal", ulid_like_stamp())),
-            };
-            println!("graph '{}' v{} — executing (attempt {attempt}/{max_attempts}, every step journaled)",
-                spec.graph.name, spec.graph.version);
-            let executor = Executor {
-                tool_invoker: tool_plane.clone(),
-                cancellation: cancellation.clone(),
-                remaining_budget: remaining,
-                ..Default::default()
-            };
-            let outcome = executor.run(&spec, &spec_text, RunInput {
-                prompt: prompt.clone(),
-                is_correction: correction,
-                session_id: session_id.clone(),
-                feedback: std::mem::take(&mut feedback),
-                attempt_group_id: attempt_group.clone(),
-                attempt_index: attempt,
-                retry_of_run_id: if attempt > 1 { prior_run_id.clone() } else { None },
-                run_kind: if attempt > 1 { wire::RunKind::AutomaticRetry }
-                    else if continuing_session { wire::RunKind::ExternalFollowup }
-                    else { wire::RunKind::InitialAttempt } as i32,
-                prior_boundary: prior_boundary.clone(),
-            }, &path, invoker.as_ref(), &CliApprovalHandler).await?;
-            session_id = Some(outcome.session_id.clone());
-            attempt_group = Some(outcome.attempt_group_id.clone());
-            prior_run_id = Some(outcome.run_id.clone());
-            tokens_spent = tokens_spent.saturating_add(outcome.input_tokens).saturating_add(outcome.output_tokens);
-            usd_spent += outcome.total_usd;
-            let status = outcome.status;
-            let harvest_path = outcome.journal_path.clone();
-            report_outcome(&spec, &spec_text, outcome).await?;
-            if status == wire::RunStatus::Succeeded {
-                if attempt > 1 { println!("converged on attempt {attempt}/{max_attempts} (internal execution only)"); }
-                println!("continue session: graffy run {spec_arg} --prompt \"...\" --session {}", session_id.as_deref().unwrap_or_default());
-                return Ok(());
-            }
-            if matches!(status, wire::RunStatus::Cancelled | wire::RunStatus::BudgetExhausted) || attempt == max_attempts {
-                anyhow::bail!("run ended {status:?}; no answer released");
-            }
-            match harvest_feedback(&harvest_path, attempt) {
-                Some(item) => {
-                    println!("retrying with recorded review feedback (whole-turn budget still applies)");
-                    feedback = vec![item];
-                }
-                None => anyhow::bail!("run ended {status:?} with no repair signal; no further attempts"),
-            }
-        }
-        anyhow::bail!("retry attempts exhausted")
-    }.await;
+    let mut runner = turn::TurnRunner::new(turn);
+    let result = drive_turn(&spec, &spec_text, &mut runner, false, &mut None).await;
     signal_task.abort();
-    result
+    result?;
+    println!(
+        "continue session: graffy run {spec_arg} --prompt \"...\" --session {}",
+        runner.session_id().unwrap_or_default()
+    );
+    Ok(())
 }
 
-/// Pull the most recent failure signal out of a journal — judge-named modes
-/// preferred over Unspecified — as the next attempt's repair context.
-fn harvest_feedback(
-    journal_path: &std::path::Path,
-    attempt: u32,
-) -> Option<graffy_core::exec::RepairFeedback> {
-    let events = graffy_core::journal::JournalReader::read_all(journal_path).ok()?;
-    let mut last_any = None;
-    let mut last_named = None;
-    for ev in &events {
-        if let Some(graffy_core::journal::wire::run_event::Event::FailureRaised(f)) = &ev.event {
-            last_any = Some(f);
-            if f.mode != graffy_proto::mcw::v1::FailureMode::Unspecified as i32 {
-                last_named = Some(f);
+/// `--retry` → total attempts per turn (the first attempt plus retries).
+fn max_attempts_from(retry: Option<&str>) -> anyhow::Result<u32> {
+    let retries = match retry {
+        None => 0,
+        Some("auto") => DEFAULT_AUTO_RETRIES,
+        Some(n) => n
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("--retry takes a number or 'auto', got '{n}'"))?,
+    };
+    retries
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("--retry is too large"))
+}
+
+/// Visible boundary history of an existing session, for model context.
+/// Unknown sessions and unreadable history fail loudly — never "empty".
+async fn hydrate_history(session: &str) -> anyhow::Result<Vec<(String, String)>> {
+    Ok(session_history(session).await?.0)
+}
+
+/// Visible history plus the id of the graph the session's latest run used.
+async fn session_history(session: &str) -> anyhow::Result<(Vec<(String, String)>, String)> {
+    let runs = load_session_runs(&runs_dir(), session).await?;
+    if runs.is_empty() {
+        anyhow::bail!("unknown session '{session}'; omit --session to start a new conversation");
+    }
+    let projection = graffy_core::boundary::project(&runs);
+    if projection
+        .turns
+        .iter()
+        .any(|t| t.visibility != graffy_core::boundary::Visibility::Visible)
+    {
+        eprintln!(
+            "warning: history includes unconfirmed delivery; those contributions are excluded from model context"
+        );
+    }
+    let last_graph = runs
+        .last()
+        .and_then(|events| {
+            events.iter().find_map(|e| match &e.event {
+                Some(wire::run_event::Event::RunStarted(m)) => Some(m.graph_id.clone()),
+                _ => None,
+            })
+        })
+        .unwrap_or_default();
+    Ok((
+        graffy_core::boundary::hydration_from(&projection),
+        last_graph,
+    ))
+}
+
+/// Connect the graph's tool plane, bounded by the graph's own time budget.
+async fn connect_tools(spec: &GraphSpec) -> anyhow::Result<Option<Arc<dyn ToolInvoker>>> {
+    match spec.policy.budget.max_seconds {
+        Some(seconds) => tokio::time::timeout(
+            std::time::Duration::from_secs(seconds),
+            build_tool_plane(spec),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("run deadline exhausted while connecting tools"))?,
+        None => build_tool_plane(spec).await,
+    }
+}
+
+/// Plain-terminal rendering of one turn: run attempts until the graph
+/// releases an answer or the turn honestly ends with nothing released.
+async fn drive_turn(
+    spec: &GraphSpec,
+    spec_text: &str,
+    runner: &mut turn::TurnRunner,
+    compact: bool,
+    progress: &mut Option<tokio::sync::mpsc::UnboundedReceiver<wire::RunEvent>>,
+) -> anyhow::Result<()> {
+    // Step progress goes to stderr so stdout stays the conversation itself.
+    fn show(frame: &wire::RunEvent) {
+        if let Some(wire::run_event::Event::NodeTransition(t)) = &frame.event
+            && t.to == wire::NodeState::Running as i32
+        {
+            eprintln!("  · step: {}", t.node_id);
+        }
+    }
+    loop {
+        let outcome = {
+            let attempt = runner.attempt(|attempt, max| {
+                if !compact {
+                    println!(
+                        "graph '{}' v{} — executing (attempt {attempt}/{max}, every step journaled)",
+                        spec.graph.name, spec.graph.version
+                    )
+                }
+            });
+            tokio::pin!(attempt);
+            loop {
+                tokio::select! {
+                    Some(frame) = async {
+                        match progress.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => show(&frame),
+                    outcome = &mut attempt => break outcome?,
+                }
+            }
+        };
+        // Everything the attempt recorded is shown before its answer is.
+        while let Some(frame) = progress.as_mut().and_then(|rx| rx.try_recv().ok()) {
+            show(&frame);
+        }
+        report_outcome(spec, spec_text, &outcome, compact).await?;
+        match runner.verdict(&outcome)? {
+            turn::Verdict::Released => {
+                if runner.attempt_number() > 1 {
+                    println!(
+                        "converged on attempt {}/{} (internal execution only)",
+                        runner.attempt_number(),
+                        runner.max_attempts()
+                    );
+                }
+                return Ok(());
+            }
+            turn::Verdict::Retry => {
+                println!("retrying with recorded review feedback (whole-turn budget still applies)")
             }
         }
     }
-    let f = last_named.or(last_any)?;
-    Some(graffy_core::exec::RepairFeedback {
-        failure_id: f.id.clone(),
-        mode: graffy_proto::mcw::v1::FailureMode::try_from(f.mode)
-            .unwrap_or(graffy_proto::mcw::v1::FailureMode::Unspecified),
-        critique: f.early_signal.clone(),
-        source_attempt: attempt,
-    })
+}
+
+/// `graffy chat`: a line-at-a-time conversation where every line is one turn
+/// through the shared runner. Works piped (EOF ends the chat; it never
+/// approves or sends anything).
+async fn chat(
+    graph: Option<String>,
+    offline: bool,
+    retry: Option<String>,
+    mut session: Option<String>,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::io::{IsTerminal, Write};
+    let resumed = match &session {
+        Some(id) => Some(session_history(id).await?),
+        None => None,
+    };
+    // An explicit pin wins. Otherwise a resumed chat stays on the graph it was
+    // using — silently swapping graphs could drop that graph's approval gate.
+    let graph_arg = match (&graph, &resumed) {
+        (Some(pinned), _) => pinned.clone(),
+        (None, Some((_, session_graph))) => session_graph.clone(),
+        (None, None) => "graffy.builtin.conversation".to_owned(),
+    };
+    let spec_text = resolve_spec(&graph_arg).await.with_context(|| {
+        format!(
+            "cannot load the graph for this chat ('{graph_arg}'); if the session used a graph file, pass --graph <path>"
+        )
+    })?;
+    let spec = GraphSpec::from_toml_str(&spec_text)?;
+    graffy_core::graph::CompiledGraph::compile(&spec)?;
+    let max_attempts = max_attempts_from(retry.as_deref())?;
+    if let Some((history, session_graph)) = &resumed {
+        if session_graph != &spec.graph.id {
+            eprintln!(
+                "note: this session last ran on graph '{session_graph}'; continuing on '{}' because --graph pins it",
+                spec.graph.id
+            );
+        }
+        // Resuming restores the recorded transcript; it re-executes nothing.
+        for (actor, content) in history {
+            println!("{actor}> {content}");
+        }
+    }
+    let invoker = build_invoker(offline);
+    let tools = connect_tools(&spec).await?;
+    println!(
+        "graffy chat — graph '{}' v{}. Every message runs as a journaled graph.\n\
+         /correct <text> sends a correction · /quit or end-of-input leaves · Ctrl-C stops the current turn",
+        spec.graph.name, spec.graph.version
+    );
+
+    // Ctrl-C cancels the turn in flight; with no turn running it leaves chat.
+    let active: Arc<std::sync::Mutex<Option<graffy_core::control::Cancellation>>> =
+        Default::default();
+    let active_for_signal = active.clone();
+    let signal_task = tokio::spawn(async move {
+        while tokio::signal::ctrl_c().await.is_ok() {
+            match active_for_signal.lock().unwrap().as_ref() {
+                Some(cancellation) => cancellation.cancel(),
+                None => std::process::exit(130),
+            }
+        }
+    });
+
+    let (tap, progress) = tokio::sync::mpsc::unbounded_channel();
+    let mut progress = Some(progress);
+    let interactive = std::io::stdin().is_terminal();
+    // Piped lines are conversation. Only a human at a terminal can approve.
+    let approvals: Arc<dyn ApprovalHandler> = if interactive {
+        Arc::new(CliApprovalHandler)
+    } else {
+        Arc::new(PipedChatApprovals)
+    };
+    let mut unreleased = 0u32;
+    loop {
+        if interactive {
+            print!("\nyou> ");
+            std::io::stdout().flush()?;
+        }
+        // ponytail: the approval prompt reads stdin from a detached thread; an
+        // approval abandoned by a deadline can swallow the next chat line
+        // (docs/KNOWN-ISSUES.md). One owned stdin reader fixes it if it bites.
+        let line = tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).map(|n| (n, line))
+        })
+        .await??;
+        let (read, text) = line;
+        if read == 0 {
+            break; // end of input: leave without sending anything
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if text == "/quit" {
+            break;
+        }
+        let (prompt, correction) = match text.strip_prefix("/correct ") {
+            Some(rest) => (rest.trim(), true),
+            None => (text, false),
+        };
+        if correction && session.is_none() {
+            eprintln!("nothing to correct yet: /correct needs an earlier turn in this chat");
+            continue;
+        }
+        let prior_boundary = match &session {
+            Some(id) => match hydrate_history(id).await {
+                Ok(history) => history,
+                Err(err) => {
+                    unreleased += 1;
+                    eprintln!("turn not started: {err}");
+                    continue;
+                }
+            },
+            None => Vec::new(),
+        };
+        let cancellation = graffy_core::control::Cancellation::default();
+        *active.lock().unwrap() = Some(cancellation.clone());
+        let mut runner = turn::TurnRunner::new(turn::Turn {
+            spec: spec.clone(),
+            spec_text: spec_text.clone(),
+            prompt: prompt.to_owned(),
+            correction,
+            session: session.clone(),
+            prior_boundary,
+            max_attempts,
+            journal: None,
+            runs_dir: runs_dir(),
+            started: std::time::Instant::now(),
+            invoker: invoker.clone(),
+            tools: tools.clone(),
+            approvals: approvals.clone(),
+            cancellation,
+            event_tap: Some(tap.clone()),
+        });
+        let result = drive_turn(&spec, &spec_text, &mut runner, true, &mut progress).await;
+        *active.lock().unwrap() = None;
+        if let Some(id) = runner.session_id() {
+            session = Some(id.to_owned());
+        }
+        if let Err(err) = result {
+            unreleased += 1;
+            eprintln!("turn failed: {err}");
+        }
+    }
+    signal_task.abort();
+    if let Some(id) = &session {
+        // Repeat an explicit pin so the printed command resumes the same graph
+        // even when it is an unregistered file.
+        let pin = graph
+            .as_ref()
+            .map(|g| format!(" --graph \"{g}\""))
+            .unwrap_or_default();
+        println!("\nresume this chat: graffy chat --session {id}{pin}");
+    }
+    if unreleased > 0 {
+        anyhow::bail!("{unreleased} turn(s) released no answer");
+    }
+    Ok(())
 }
 
 async fn report_outcome(
     spec: &GraphSpec,
     spec_text: &str,
-    outcome: RunOutcome,
+    outcome: &RunOutcome,
+    compact: bool,
 ) -> anyhow::Result<()> {
     use std::io::Write;
     let delivered = (|| -> anyhow::Result<()> {
         let stdout = std::io::stdout();
         let mut output = stdout.lock();
-        writeln!(
-            output,
-            "\nrun     : {}\nsession : {}\nstatus  : {:?}",
-            outcome.run_id, outcome.session_id, outcome.status
-        )?;
-        writeln!(
-            output,
-            "tokens  : {} in / {} out   cost: unavailable (pricing not configured)   wall: {}ms",
-            outcome.input_tokens, outcome.output_tokens, outcome.duration_ms
-        )?;
-        for note in &outcome.notes {
-            writeln!(output, "note    : {note}")?;
+        if compact {
+            // Chat shows the conversation; run details stay one replay away.
+            if outcome.status != wire::RunStatus::Succeeded {
+                writeln!(
+                    output,
+                    "attempt ended {:?}; no answer released",
+                    outcome.status
+                )?;
+                for note in &outcome.notes {
+                    writeln!(output, "note    : {note}")?;
+                }
+            }
+        } else {
+            writeln!(
+                output,
+                "\nrun     : {}\nsession : {}\nstatus  : {:?}",
+                outcome.run_id, outcome.session_id, outcome.status
+            )?;
+            writeln!(
+                output,
+                "tokens  : {} in / {} out   cost: unavailable (pricing not configured)   wall: {}ms",
+                outcome.input_tokens, outcome.output_tokens, outcome.duration_ms
+            )?;
+            for note in &outcome.notes {
+                writeln!(output, "note    : {note}")?;
+            }
+            writeln!(
+                output,
+                "journal : {}\ninspect : graffy replay \"{}\" --tui",
+                outcome.journal_path.display(),
+                outcome.journal_path.display()
+            )?;
         }
-        writeln!(
-            output,
-            "journal : {}\ninspect : graffy replay \"{}\" --tui",
-            outcome.journal_path.display(),
-            outcome.journal_path.display()
-        )?;
         if outcome.status == wire::RunStatus::Succeeded && outcome.final_text.is_some() {
             JournalWriter::deliver_response(&outcome.journal_path, &outcome.run_id, &mut output)?;
+        }
+        if compact {
+            writeln!(
+                output,
+                "details : graffy replay \"{}\" --tui",
+                outcome.journal_path.display()
+            )?;
         }
         output.flush()?;
         Ok(())
     })();
-    match index_run(spec, spec_text, &outcome).await {
+    match index_run(spec, spec_text, outcome).await {
         Ok(_) => {}
         Err(err) => eprintln!("warning: indexing failed ({err}); journal remains canonical"),
     }
@@ -2052,6 +2282,25 @@ impl ApprovalHandler for CliApprovalHandler {
             let _ = send.send(decision);
         });
         receive.await.unwrap_or(ApprovalOutcome::Abandoned)
+    }
+}
+
+/// Approvals for piped `graffy chat`: every stdin line is a conversation
+/// message, so none is ever read as a decision. The gate is abandoned and
+/// nothing is released — a chat message saying "yes" must not approve.
+struct PipedChatApprovals;
+
+#[async_trait::async_trait]
+impl ApprovalHandler for PipedChatApprovals {
+    fn describe(&self) -> &'static str {
+        "noninteractive-chat"
+    }
+
+    async fn resolve(&self, node_id: &str, _question: &str) -> ApprovalOutcome {
+        eprintln!(
+            "approval required at node '{node_id}', but chat input is not a terminal: abandoned, nothing released"
+        );
+        ApprovalOutcome::Abandoned
     }
 }
 

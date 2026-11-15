@@ -12,6 +12,7 @@
 //! arrows scroll the exact payload. Quitting cancels an unfinished run;
 //! EOF/closed UI is not recorded as a human decision.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,11 +25,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use graffy_core::error::ExecError;
-use graffy_core::exec::{
-    ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, RunInput, RunOutcome, ToolInvoker,
-};
-use graffy_core::journal::{JournalReader, wire};
+use graffy_core::control::Cancellation;
+use graffy_core::exec::{ApprovalHandler, ApprovalOutcome, RunOutcome};
+use graffy_core::journal::{EventTap, JournalReader, wire};
 use graffy_core::spec::GraphSpec;
 
 use crate::state::{AppState, state_glyph, state_word, status_word};
@@ -107,51 +106,27 @@ impl ApprovalHandler for TuiApprovalHandler {
 // Entry points
 // ---------------------------------------------------------------------------
 
-/// Execute a graph live inside the TUI. Returns the run outcome (None if the
-/// executor task failed; its error is printed after terminal restore).
-pub async fn run_live(
-    spec: GraphSpec,
-    spec_toml: String,
-    prompt: String,
-    journal_path: PathBuf,
-    invoker: Arc<dyn ModelInvoker>,
-    tool_invoker: Option<Arc<dyn ToolInvoker>>,
-    remaining_budget: graffy_core::control::RemainingBudget,
-) -> Result<Option<RunOutcome>> {
+/// Render one live run inside the TUI. `start` receives the journal tap, the
+/// TUI approval handler and the cancellation handle, and returns the future
+/// that executes the run — the caller owns *how* a run executes, so the TUI
+/// cannot drift from the plain CLI. Returns None if that future failed (its
+/// error is printed after terminal restore).
+pub async fn run_live<F, Fut>(spec: &GraphSpec, start: F) -> Result<Option<RunOutcome>>
+where
+    F: FnOnce(EventTap, Arc<dyn ApprovalHandler>, Cancellation) -> Fut,
+    Fut: Future<Output = Result<RunOutcome>> + Send + 'static,
+{
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
-    let cancellation = graffy_core::control::Cancellation::default();
-    let executor = Executor {
-        cancellation: cancellation.clone(),
-        event_tap: Some(tx),
-        tool_invoker,
-        remaining_budget,
-        ..Default::default()
-    };
-
-    let spec_for_task = spec.clone();
-    let path_for_task = journal_path.clone();
-    let task: tokio::task::JoinHandle<Result<RunOutcome, ExecError>> = tokio::spawn(async move {
-        let approvals = TuiApprovalHandler { tx: approval_tx };
-        executor
-            .run(
-                &spec_for_task,
-                &spec_toml,
-                RunInput {
-                    prompt,
-                    session_id: None,
-                    feedback: Vec::new(),
-                    ..Default::default()
-                },
-                &path_for_task,
-                invoker.as_ref(),
-                &approvals,
-            )
-            .await
-    });
+    let cancellation = Cancellation::default();
+    let task = tokio::spawn(start(
+        tx,
+        Arc::new(TuiApprovalHandler { tx: approval_tx }),
+        cancellation.clone(),
+    ));
 
     let mut app = AppState::default();
-    app.seed_from_spec(&spec);
+    app.seed_from_spec(spec);
     let mut ui = UiState::new(View::Run);
 
     let mut terminal = ratatui::init();
@@ -293,7 +268,7 @@ fn live_loop(
     terminal: &mut DefaultTerminal,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<wire::RunEvent>,
     approvals: &mut tokio::sync::mpsc::UnboundedReceiver<ApprovalRequest>,
-    task: &tokio::task::JoinHandle<Result<RunOutcome, ExecError>>,
+    task: &tokio::task::JoinHandle<Result<RunOutcome>>,
     app: &mut AppState,
     ui: &mut UiState,
 ) -> Result<()> {
