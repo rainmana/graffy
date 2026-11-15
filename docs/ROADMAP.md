@@ -110,6 +110,18 @@ Goal: a stranger can watch a prompt refuse to run raw.
   side efforts (logo routes, palettes, light/dark mode studies). Not integrated anywhere yet —
   when the theme engine lands, that work is the natural seed for graffy's default identity
   and first-party theme.
+- **Richer chat TUI — after chat works end to end as graffy** (owner request,
+  2026-11-15): the first `graffy chat --tui` is deliberately plain. Later: a more
+  interactive feel and fuller mouse support (click to focus/select, not only
+  wheel scroll); live visualizations — @rainmana's **friendo** project
+  (github.com/rainmana/friendo) has a live map, an "Understanding" panel that
+  separates recorded intent from model-reported interpretation, and stale markers
+  after corrections, all of which map onto graffy's journal and MCW boundary
+  records; and "flair" drawn from the Ratatui showcase projects (a cyberpunk
+  aura). Breadcrumbs: friendo is the owner's own code and he has offered it, but
+  it is licensed GPL-3.0-only — record any inflow in `NOTICE.md` and reconcile it
+  with graffy's license first. Keep the accessibility rules (glyph AND word,
+  minimal motion, plain-terminal parity) when adding motion or color.
 - **Theme engine**: first-class TUI themes — Catppuccin, Dracula, and Nord out of the box,
   plus user-defined theme files (a `themes/*.toml` format in the same durable spirit as graph
   specs); optional Unicode / Nerd-Font icon sets with a plain-ASCII fallback that is always

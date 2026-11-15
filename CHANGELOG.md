@@ -32,6 +32,9 @@
   approve, Ctrl-R reject — so text typed as a prompt appears can never decide a
   gate. Recorded text is stripped of control characters before rendering. Paste
   keeps newlines. Ctrl-C stops the running turn, or leaves when idle.
+  The transcript scrolls with the mouse wheel, ↑/↓, and Ctrl-U / Ctrl-D (no
+  PageUp/PageDown key needed); with mouse capture on, selecting text needs the
+  terminal's modifier key (Option on macOS terminals, Shift on most others).
 - **TUI logging:** default log output is off while a TUI owns the screen (log
   lines were being drawn over the live view); `-v` or `RUST_LOG` still enables it.
 

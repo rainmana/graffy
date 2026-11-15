@@ -10,7 +10,8 @@
 use std::pin::Pin;
 
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyEvent, KeyModifiers,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, KeyEvent,
+    KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 
@@ -95,6 +96,11 @@ impl ChatState {
         self.scroll_back = 0;
     }
 
+    /// Scroll the transcript; positive is toward older messages.
+    fn scroll(&mut self, lines: i16) {
+        self.scroll_back = self.scroll_back.saturating_add_signed(lines);
+    }
+
     fn on_paste(&mut self, text: &str) {
         self.input
             .push_str(&clean(&text.replace("\r\n", "\n").replace('\r', "\n")));
@@ -114,8 +120,15 @@ impl ChatState {
             KeyCode::Backspace => {
                 self.input.pop();
             }
-            KeyCode::PageUp => self.scroll_back = self.scroll_back.saturating_add(5),
-            KeyCode::PageDown => self.scroll_back = self.scroll_back.saturating_sub(5),
+            // Scrolling needs no PageUp/PageDown key (laptop keyboards): arrows
+            // move a line, Ctrl-U / Ctrl-D half a page as in vim. Plain letters
+            // stay text, so j/k cannot scroll while the composer has focus.
+            KeyCode::Up => self.scroll(1),
+            KeyCode::Down => self.scroll(-1),
+            KeyCode::Char('u') if ctrl => self.scroll(10),
+            KeyCode::Char('d') if ctrl => self.scroll(-10),
+            KeyCode::PageUp => self.scroll(10),
+            KeyCode::PageDown => self.scroll(-10),
             KeyCode::Tab if !self.busy => return Action::Details,
             // ponytail: append-only editing (no cursor movement inside the
             // draft). Add a cursor index if editing mid-line is missed.
@@ -286,7 +299,9 @@ where
 
     let mut terminal = ratatui::init();
     // Without bracketed paste, a pasted newline would submit a half message.
-    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    // Mouse capture gives wheel scrolling. Cost: selecting text then needs the
+    // terminal's modifier (Option on macOS terminals, Shift on most others).
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
     let result: Result<()> = async {
         loop {
             if let Some(turn) = &mut active {
@@ -353,6 +368,19 @@ where
                 continue;
             }
             let action = match event::read()? {
+                TermEvent::Mouse(mouse) => {
+                    let lines = match mouse.kind {
+                        MouseEventKind::ScrollUp => 3,
+                        MouseEventKind::ScrollDown => -3,
+                        _ => 0,
+                    };
+                    match &mut ui.approval {
+                        // With a payload on screen the wheel scrolls the payload.
+                        Some(prompt) => prompt.scroll = prompt.scroll.saturating_add_signed(-lines),
+                        None => chat.scroll(lines),
+                    }
+                    Action::None
+                }
                 TermEvent::Paste(text) if ui.approval.is_none() => {
                     chat.on_paste(&text);
                     Action::None
@@ -421,7 +449,11 @@ where
         }
     }
     .await;
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture
+    );
     ratatui::restore();
 
     // Leaving with a turn in flight cancels it; EOF/closed UI is never a decision.
@@ -510,7 +542,7 @@ fn draw_chat(
         (Some(hint), _) => format!(" {hint}"),
         (None, true) => format!(" working — {}", app.novice_line),
         (None, false) if back > 0 => {
-            " ready — scrolled up; PgDn returns to the newest message".into()
+            " ready — scrolled up; scroll down to return to the newest message".into()
         }
         (None, false) => " ready".into(),
     };
@@ -518,7 +550,7 @@ fn draw_chat(
         Paragraph::new(vec![
             Line::from(Span::styled(status, Style::new().fg(Color::Yellow))),
             Line::from(Span::styled(
-                " Enter send · PgUp/PgDn scroll · Tab run details · /new · /correct <text> · Ctrl-C stop turn / quit",
+                " Enter send · wheel / ↑↓ / Ctrl-U Ctrl-D scroll · Tab run details · /new · /correct <text> · Ctrl-C stop turn / quit",
                 Style::new().fg(Color::DarkGray),
             )),
         ]),
@@ -645,6 +677,24 @@ mod tests {
         for (width, height) in [(20, 6), (4, 3), (1, 1)] {
             render(width, height);
         }
+    }
+
+    #[test]
+    fn scrolling_works_without_page_keys_and_letters_stay_text() {
+        let mut chat = ChatState::default();
+        chat.on_key(key(KeyCode::Up));
+        chat.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(chat.scroll_back, 11);
+        chat.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        chat.on_key(key(KeyCode::Down));
+        chat.on_key(key(KeyCode::Down)); // cannot scroll below the newest line
+        assert_eq!(chat.scroll_back, 0);
+        type_text(&mut chat, "jk");
+        assert_eq!((chat.input.as_str(), chat.scroll_back), ("jk", 0));
+        // A new message always returns the view to the bottom.
+        chat.scroll(7);
+        chat.push(Who::Note, "note", "hi");
+        assert_eq!(chat.scroll_back, 0);
     }
 
     #[test]
