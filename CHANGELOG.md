@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Shared turn runner (ADR-0010 step 1):** `src/turn.rs` owns attempt identity,
+  whole-turn budgets and retry verdicts. `graffy run` and `graffy run --tui` both
+  drive it; `graffy_tui::run_live` no longer builds its own executor. No behavior
+  change is intended; `--retry`, `--session` and `--correction` still require
+  plain CLI mode because the live view folds a single run.
+
 ## Unreleased (v0.1.0-alpha.6)
 
 - **Release reliability:** invalid support floors, evidence modes and unsupported

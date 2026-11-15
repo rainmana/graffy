@@ -4,6 +4,7 @@
 //! inspectable, durable, shareable agent graph. See docs/ARCHITECTURE.md.
 
 mod rating;
+mod turn;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,9 +12,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 
 use graffy_core::exec::ToolInvoker;
-use graffy_core::exec::{
-    ApprovalHandler, ApprovalOutcome, Executor, ModelInvoker, OfflineEcho, RunInput, RunOutcome,
-};
+use graffy_core::exec::{ApprovalHandler, ApprovalOutcome, ModelInvoker, OfflineEcho, RunOutcome};
 use graffy_core::journal::{JournalReader, JournalWriter, event_kind, summarize, wire};
 use graffy_core::spec::GraphSpec;
 use graffy_mcp::{LiveServer, RegistryToolInvoker, ServerBinding};
@@ -590,7 +589,6 @@ async fn run_graph(
             "journal already exists; choose a new path (existing journals are never overwritten)"
         );
     }
-    let continuing_session = session.is_some();
     let prior_boundary = match &session {
         Some(id) => {
             let runs = load_session_runs(&runs_dir(), id).await?;
@@ -623,143 +621,92 @@ async fn run_graph(
     } else {
         build_tool_plane(&spec).await?
     };
+    let cancellation = graffy_core::control::Cancellation::default();
+    // Both frontends drive the same runner (ADR-0010): only rendering differs.
+    let turn = turn::Turn {
+        spec: spec.clone(),
+        spec_text: spec_text.clone(),
+        prompt,
+        correction,
+        session,
+        prior_boundary,
+        max_attempts,
+        journal,
+        runs_dir: runs_dir(),
+        started: turn_started,
+        invoker,
+        tools: tool_plane,
+        approvals: Arc::new(CliApprovalHandler),
+        cancellation: cancellation.clone(),
+        event_tap: None,
+    };
     if tui {
-        let path =
-            journal.unwrap_or_else(|| runs_dir().join(format!("{}.journal", ulid_like_stamp())));
-        let outcome = graffy_tui::run_live(
-            spec.clone(),
-            spec_text.clone(),
-            prompt,
-            path,
-            invoker,
-            tool_plane,
-            graffy_core::control::RemainingBudget {
-                duration: spec.policy.budget.max_seconds.map(|seconds| {
-                    std::time::Duration::from_secs(seconds).saturating_sub(turn_started.elapsed())
-                }),
-                ..Default::default()
-            },
-        )
+        let outcome = graffy_tui::run_live(&spec, move |tap, approvals, cancellation| async move {
+            turn::TurnRunner::new(turn::Turn {
+                event_tap: Some(tap),
+                approvals,
+                cancellation,
+                ..turn
+            })
+            .attempt(|_, _| {})
+            .await
+        })
         .await?
         .ok_or_else(|| anyhow::anyhow!("run failed; see the journal"))?;
-        let status = outcome.status;
-        report_outcome(&spec, &spec_text, outcome).await?;
-        if status != wire::RunStatus::Succeeded {
-            anyhow::bail!("run ended {status:?}");
+        report_outcome(&spec, &spec_text, &outcome).await?;
+        if outcome.status != wire::RunStatus::Succeeded {
+            anyhow::bail!("run ended {:?}", outcome.status);
         }
         return Ok(());
     }
-    let cancellation = graffy_core::control::Cancellation::default();
     let cancel_on_signal = cancellation.clone();
     let signal_task = tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             cancel_on_signal.cancel();
         }
     });
+    let mut runner = turn::TurnRunner::new(turn);
     let result = async {
-        let mut session_id = session;
-        let mut feedback = Vec::new();
-        let mut attempt_group = None;
-        let mut prior_run_id = None;
-        let mut tokens_spent = 0u64;
-        let mut usd_spent = 0.0f64;
-        for attempt in 1..=max_attempts {
-            let remaining = graffy_core::control::RemainingBudget {
-                tokens: spec.policy.budget.max_tokens.map(|cap| cap.saturating_sub(tokens_spent)),
-                usd: spec.policy.budget.max_usd.map(|cap| (cap - usd_spent).max(0.0)),
-                duration: spec.policy.budget.max_seconds.map(|seconds|
-                    std::time::Duration::from_secs(seconds).saturating_sub(turn_started.elapsed())),
-            };
-            if remaining.tokens == Some(0) || remaining.usd == Some(0.0)
-                || remaining.duration.is_some_and(|d| d.is_zero()) {
-                anyhow::bail!("whole-turn budget exhausted; no further attempt started");
-            }
-            let path = match (&journal, attempt) {
-                (Some(path), 1) => path.clone(),
-                _ => runs_dir().join(format!("{}.journal", ulid_like_stamp())),
-            };
-            println!("graph '{}' v{} — executing (attempt {attempt}/{max_attempts}, every step journaled)",
-                spec.graph.name, spec.graph.version);
-            let executor = Executor {
-                tool_invoker: tool_plane.clone(),
-                cancellation: cancellation.clone(),
-                remaining_budget: remaining,
-                ..Default::default()
-            };
-            let outcome = executor.run(&spec, &spec_text, RunInput {
-                prompt: prompt.clone(),
-                is_correction: correction,
-                session_id: session_id.clone(),
-                feedback: std::mem::take(&mut feedback),
-                attempt_group_id: attempt_group.clone(),
-                attempt_index: attempt,
-                retry_of_run_id: if attempt > 1 { prior_run_id.clone() } else { None },
-                run_kind: if attempt > 1 { wire::RunKind::AutomaticRetry }
-                    else if continuing_session { wire::RunKind::ExternalFollowup }
-                    else { wire::RunKind::InitialAttempt } as i32,
-                prior_boundary: prior_boundary.clone(),
-            }, &path, invoker.as_ref(), &CliApprovalHandler).await?;
-            session_id = Some(outcome.session_id.clone());
-            attempt_group = Some(outcome.attempt_group_id.clone());
-            prior_run_id = Some(outcome.run_id.clone());
-            tokens_spent = tokens_spent.saturating_add(outcome.input_tokens).saturating_add(outcome.output_tokens);
-            usd_spent += outcome.total_usd;
-            let status = outcome.status;
-            let harvest_path = outcome.journal_path.clone();
-            report_outcome(&spec, &spec_text, outcome).await?;
-            if status == wire::RunStatus::Succeeded {
-                if attempt > 1 { println!("converged on attempt {attempt}/{max_attempts} (internal execution only)"); }
-                println!("continue session: graffy run {spec_arg} --prompt \"...\" --session {}", session_id.as_deref().unwrap_or_default());
-                return Ok(());
-            }
-            if matches!(status, wire::RunStatus::Cancelled | wire::RunStatus::BudgetExhausted) || attempt == max_attempts {
-                anyhow::bail!("run ended {status:?}; no answer released");
-            }
-            match harvest_feedback(&harvest_path, attempt) {
-                Some(item) => {
-                    println!("retrying with recorded review feedback (whole-turn budget still applies)");
-                    feedback = vec![item];
+        loop {
+            let outcome = runner
+                .attempt(|attempt, max| {
+                    println!(
+                        "graph '{}' v{} — executing (attempt {attempt}/{max}, every step journaled)",
+                        spec.graph.name, spec.graph.version
+                    )
+                })
+                .await?;
+            report_outcome(&spec, &spec_text, &outcome).await?;
+            match runner.verdict(&outcome)? {
+                turn::Verdict::Released => {
+                    if runner.attempt_number() > 1 {
+                        println!(
+                            "converged on attempt {}/{} (internal execution only)",
+                            runner.attempt_number(),
+                            runner.max_attempts()
+                        );
+                    }
+                    println!(
+                        "continue session: graffy run {spec_arg} --prompt \"...\" --session {}",
+                        runner.session_id().unwrap_or_default()
+                    );
+                    return Ok(());
                 }
-                None => anyhow::bail!("run ended {status:?} with no repair signal; no further attempts"),
-            }
-        }
-        anyhow::bail!("retry attempts exhausted")
-    }.await;
-    signal_task.abort();
-    result
-}
-
-/// Pull the most recent failure signal out of a journal — judge-named modes
-/// preferred over Unspecified — as the next attempt's repair context.
-fn harvest_feedback(
-    journal_path: &std::path::Path,
-    attempt: u32,
-) -> Option<graffy_core::exec::RepairFeedback> {
-    let events = graffy_core::journal::JournalReader::read_all(journal_path).ok()?;
-    let mut last_any = None;
-    let mut last_named = None;
-    for ev in &events {
-        if let Some(graffy_core::journal::wire::run_event::Event::FailureRaised(f)) = &ev.event {
-            last_any = Some(f);
-            if f.mode != graffy_proto::mcw::v1::FailureMode::Unspecified as i32 {
-                last_named = Some(f);
+                turn::Verdict::Retry => println!(
+                    "retrying with recorded review feedback (whole-turn budget still applies)"
+                ),
             }
         }
     }
-    let f = last_named.or(last_any)?;
-    Some(graffy_core::exec::RepairFeedback {
-        failure_id: f.id.clone(),
-        mode: graffy_proto::mcw::v1::FailureMode::try_from(f.mode)
-            .unwrap_or(graffy_proto::mcw::v1::FailureMode::Unspecified),
-        critique: f.early_signal.clone(),
-        source_attempt: attempt,
-    })
+    .await;
+    signal_task.abort();
+    result
 }
 
 async fn report_outcome(
     spec: &GraphSpec,
     spec_text: &str,
-    outcome: RunOutcome,
+    outcome: &RunOutcome,
 ) -> anyhow::Result<()> {
     use std::io::Write;
     let delivered = (|| -> anyhow::Result<()> {
@@ -790,7 +737,7 @@ async fn report_outcome(
         output.flush()?;
         Ok(())
     })();
-    match index_run(spec, spec_text, &outcome).await {
+    match index_run(spec, spec_text, outcome).await {
         Ok(_) => {}
         Err(err) => eprintln!("warning: indexing failed ({err}); journal remains canonical"),
     }
