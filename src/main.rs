@@ -105,8 +105,10 @@ enum Command {
     /// journaled graph (ADR-0010); one session carries the conversation.
     Chat {
         /// Graph each turn runs on: a TOML path or a registered graph id.
-        #[arg(long, default_value = "graffy.builtin.conversation")]
-        graph: String,
+        /// Default: the session's own graph when resuming, otherwise the
+        /// built-in conversation graph.
+        #[arg(long)]
+        graph: Option<String>,
         /// Deterministic offline echo invoker (no model, no network).
         #[arg(long)]
         offline: bool,
@@ -691,6 +693,11 @@ fn max_attempts_from(retry: Option<&str>) -> anyhow::Result<u32> {
 /// Visible boundary history of an existing session, for model context.
 /// Unknown sessions and unreadable history fail loudly — never "empty".
 async fn hydrate_history(session: &str) -> anyhow::Result<Vec<(String, String)>> {
+    Ok(session_history(session).await?.0)
+}
+
+/// Visible history plus the id of the graph the session's latest run used.
+async fn session_history(session: &str) -> anyhow::Result<(Vec<(String, String)>, String)> {
     let runs = load_session_runs(&runs_dir(), session).await?;
     if runs.is_empty() {
         anyhow::bail!("unknown session '{session}'; omit --session to start a new conversation");
@@ -705,7 +712,19 @@ async fn hydrate_history(session: &str) -> anyhow::Result<Vec<(String, String)>>
             "warning: history includes unconfirmed delivery; those contributions are excluded from model context"
         );
     }
-    Ok(graffy_core::boundary::hydration_from(&projection))
+    let last_graph = runs
+        .last()
+        .and_then(|events| {
+            events.iter().find_map(|e| match &e.event {
+                Some(wire::run_event::Event::RunStarted(m)) => Some(m.graph_id.clone()),
+                _ => None,
+            })
+        })
+        .unwrap_or_default();
+    Ok((
+        graffy_core::boundary::hydration_from(&projection),
+        last_graph,
+    ))
 }
 
 /// Connect the graph's tool plane, bounded by the graph's own time budget.
@@ -788,19 +807,41 @@ async fn drive_turn(
 /// through the shared runner. Works piped (EOF ends the chat; it never
 /// approves or sends anything).
 async fn chat(
-    graph: String,
+    graph: Option<String>,
     offline: bool,
     retry: Option<String>,
     mut session: Option<String>,
 ) -> anyhow::Result<()> {
+    use anyhow::Context;
     use std::io::{IsTerminal, Write};
-    let spec_text = resolve_spec(&graph).await?;
+    let resumed = match &session {
+        Some(id) => Some(session_history(id).await?),
+        None => None,
+    };
+    // An explicit pin wins. Otherwise a resumed chat stays on the graph it was
+    // using — silently swapping graphs could drop that graph's approval gate.
+    let graph_arg = match (&graph, &resumed) {
+        (Some(pinned), _) => pinned.clone(),
+        (None, Some((_, session_graph))) => session_graph.clone(),
+        (None, None) => "graffy.builtin.conversation".to_owned(),
+    };
+    let spec_text = resolve_spec(&graph_arg).await.with_context(|| {
+        format!(
+            "cannot load the graph for this chat ('{graph_arg}'); if the session used a graph file, pass --graph <path>"
+        )
+    })?;
     let spec = GraphSpec::from_toml_str(&spec_text)?;
     graffy_core::graph::CompiledGraph::compile(&spec)?;
     let max_attempts = max_attempts_from(retry.as_deref())?;
-    if let Some(id) = &session {
+    if let Some((history, session_graph)) = &resumed {
+        if session_graph != &spec.graph.id {
+            eprintln!(
+                "note: this session last ran on graph '{session_graph}'; continuing on '{}' because --graph pins it",
+                spec.graph.id
+            );
+        }
         // Resuming restores the recorded transcript; it re-executes nothing.
-        for (actor, content) in hydrate_history(id).await? {
+        for (actor, content) in history {
             println!("{actor}> {content}");
         }
     }
@@ -828,6 +869,12 @@ async fn chat(
     let (tap, progress) = tokio::sync::mpsc::unbounded_channel();
     let mut progress = Some(progress);
     let interactive = std::io::stdin().is_terminal();
+    // Piped lines are conversation. Only a human at a terminal can approve.
+    let approvals: Arc<dyn ApprovalHandler> = if interactive {
+        Arc::new(CliApprovalHandler)
+    } else {
+        Arc::new(PipedChatApprovals)
+    };
     let mut unreleased = 0u32;
     loop {
         if interactive {
@@ -887,7 +934,7 @@ async fn chat(
             started: std::time::Instant::now(),
             invoker: invoker.clone(),
             tools: tools.clone(),
-            approvals: Arc::new(CliApprovalHandler),
+            approvals: approvals.clone(),
             cancellation,
             event_tap: Some(tap.clone()),
         });
@@ -903,7 +950,13 @@ async fn chat(
     }
     signal_task.abort();
     if let Some(id) = &session {
-        println!("\nresume this chat: graffy chat --session {id}");
+        // Repeat an explicit pin so the printed command resumes the same graph
+        // even when it is an unregistered file.
+        let pin = graph
+            .as_ref()
+            .map(|g| format!(" --graph \"{g}\""))
+            .unwrap_or_default();
+        println!("\nresume this chat: graffy chat --session {id}{pin}");
     }
     if unreleased > 0 {
         anyhow::bail!("{unreleased} turn(s) released no answer");
@@ -2229,6 +2282,25 @@ impl ApprovalHandler for CliApprovalHandler {
             let _ = send.send(decision);
         });
         receive.await.unwrap_or(ApprovalOutcome::Abandoned)
+    }
+}
+
+/// Approvals for piped `graffy chat`: every stdin line is a conversation
+/// message, so none is ever read as a decision. The gate is abandoned and
+/// nothing is released — a chat message saying "yes" must not approve.
+struct PipedChatApprovals;
+
+#[async_trait::async_trait]
+impl ApprovalHandler for PipedChatApprovals {
+    fn describe(&self) -> &'static str {
+        "noninteractive-chat"
+    }
+
+    async fn resolve(&self, node_id: &str, _question: &str) -> ApprovalOutcome {
+        eprintln!(
+            "approval required at node '{node_id}', but chat input is not a terminal: abandoned, nothing released"
+        );
+        ApprovalOutcome::Abandoned
     }
 }
 

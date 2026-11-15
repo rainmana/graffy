@@ -34,8 +34,9 @@ Each entry says what was seen, what we suspect, and what would confirm it.
   waiting, that thread is still blocked on stdin and will consume the next line
   typed — which the user meant as a chat message. The line is discarded; it is
   never treated as an approval and releases nothing.
-- **Reach**: only graphs with an approval gate, and only when the turn ends
-  before the human answers. `graffy run` is unaffected (the process exits).
+- **Reach**: interactive (terminal) chat only, on graphs with an approval gate,
+  and only when the turn ends before the human answers. Piped chat never reads
+  approvals from stdin at all (the gate is abandoned). `graffy run` is unaffected (the process exits).
 - **Fix when it bites**: one owned stdin reader for the process, handing lines
   to whichever of chat/approval is waiting.
 - **Status**: known ceiling, recorded at `graffy chat` introduction; not

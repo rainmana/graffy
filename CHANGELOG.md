@@ -17,6 +17,10 @@
   the chat continues, and the process exits nonzero. Step progress goes to stderr.
   End-of-input leaves without sending or approving anything. Ctrl-C cancels the
   turn in flight, or leaves when idle.
+  Piped chat lines are never read as approvals: with non-terminal input an
+  approval gate is abandoned and nothing is released. A resumed chat stays on the
+  session's own graph unless `--graph` pins another (which is announced), and the
+  printed resume command repeats an explicit pin.
 - **TUI logging:** default log output is off while a TUI owns the screen (log
   lines were being drawn over the live view); `-v` or `RUST_LOG` still enables it.
 

@@ -173,3 +173,66 @@ fn a_failed_turn_is_not_an_answer_and_the_chat_carries_on() {
     );
     assert!(runs.iter().all(|(_, events)| delivered(events) == 0));
 }
+
+const GATED: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/graphs/conversation.gated.toml"
+);
+
+#[test]
+fn piped_chat_lines_are_never_read_as_approvals() {
+    let h = Sandbox::new();
+    // Before the fix, "yes" was consumed as approval of the first answer.
+    let o = h.chat(&["--graph", GATED], "hello\nyes\n");
+    assert!(!o.status.success());
+    assert!(err(&o).contains("abandoned, nothing released"));
+    assert!(!out(&o).contains("reviewed response"));
+    let runs = h.runs();
+    assert_eq!(runs.len(), 2, "both lines are external turns");
+    assert!(runs.iter().all(|(_, events)| delivered(events) == 0));
+    assert!(runs.iter().all(|(_, events)| {
+        !events.iter().any(
+            |e| matches!(&e.event, Some(Event::Approval(a)) if a.decided_by.starts_with("human")),
+        )
+    }));
+}
+
+#[test]
+fn resume_stays_on_the_sessions_graph() {
+    let h = Sandbox::new();
+    let first = h.chat(&["--graph", GATED], "hello\n");
+    let resume = out(&first)
+        .lines()
+        .find(|l| l.starts_with("resume this chat:"))
+        .unwrap()
+        .to_owned();
+    assert!(
+        resume.ends_with(&format!(" --graph \"{GATED}\"")),
+        "{resume}"
+    );
+    let session = resume.split_whitespace().nth(6).unwrap().to_owned();
+
+    // No --graph on resume: the session's graph is restored, gate included.
+    let resumed = h.chat(&["--session", &session], "again\n");
+    assert!(
+        err(&resumed).contains("abandoned, nothing released"),
+        "{}",
+        err(&resumed)
+    );
+    let runs = h.runs();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].0.graph_id, runs[1].0.graph_id);
+
+    // An explicit different pin wins, and says so.
+    let pinned = h.chat(
+        &[
+            "--session",
+            &session,
+            "--graph",
+            "graffy.builtin.conversation",
+        ],
+        "third\n",
+    );
+    assert!(pinned.status.success(), "{}", err(&pinned));
+    assert!(err(&pinned).contains("because --graph pins it"));
+}
