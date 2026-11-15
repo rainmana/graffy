@@ -7,6 +7,18 @@
   drive it; `graffy_tui::run_live` no longer builds its own executor. No behavior
   change is intended; `--retry`, `--session` and `--correction` still require
   plain CLI mode because the live view folds a single run.
+- **`graffy chat` (ADR-0010 step 2):** a plain-terminal conversation on the
+  default conversation graph (`--graph` pins another). Each line is one external
+  turn through the shared runner; one session carries visible boundary history
+  into follow-ups. `--session ID` restores the recorded transcript without
+  re-executing anything; `/correct <text>` declares a human correction; `--retry`
+  bounds automatic attempts per turn. Answers appear only after the graph's
+  release decision, with a delivery receipt; a failed turn is reported as such,
+  the chat continues, and the process exits nonzero. Step progress goes to stderr.
+  End-of-input leaves without sending or approving anything. Ctrl-C cancels the
+  turn in flight, or leaves when idle.
+- **TUI logging:** default log output is off while a TUI owns the screen (log
+  lines were being drawn over the live view); `-v` or `RUST_LOG` still enables it.
 
 ## Unreleased (v0.1.0-alpha.6)
 

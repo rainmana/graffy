@@ -138,7 +138,10 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
   `graffy-mcw` exports vocabulary; `graffy-agents` and `graffy-evals` are scaffolds.
   FTS/vectors/temporal recall, learned lessons, model raters, fine-grained claim
   grounding, executable repair graphs, pricing and bundles remain future work.
-- Next: chat in Ratatui and CLI, every prompt still a graph (ADR-0010).
+- Chat (ADR-0010): steps 1–2 are in — `src/turn.rs` is the shared turn runner
+  both frontends drive (never add a second execution path), and `graffy chat` is
+  the plain-terminal loop. Next: the Ratatui conversation view (step 3), then the
+  run-details view and prompt-to-graph routing (issue #17).
   Desktop/web is tabled indefinitely. The optional graph inspection view is not
   a prerequisite for chat.
 - After chat: native Windows x64 CI/release builds are a low-priority portability
@@ -153,6 +156,7 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
 ```
 cargo test --workspace                       # offline suite; live MCP test is explicitly ignored
 cargo run -- run graffy.builtin.conversation --prompt "hi" --offline --tui
+cargo run -- chat --offline                  # terminal chat; every line is a graph turn (src/turn.rs)
 cargo run -- run <graph> --prompt "..." --retry auto   # C2 repair-feedback retries
 cargo run -- rate <session-id> [--blinded]   # boundary-transcript HRDM rating (calibration)
 cargo run -- run <graph> --prompt "..." --session <id>  # continue a session (adds an exchange)

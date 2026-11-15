@@ -101,6 +101,22 @@ enum Command {
         #[arg(long)]
         correction: bool,
     },
+    /// Chat in the terminal. Every line you send still runs as a compiled,
+    /// journaled graph (ADR-0010); one session carries the conversation.
+    Chat {
+        /// Graph each turn runs on: a TOML path or a registered graph id.
+        #[arg(long, default_value = "graffy.builtin.conversation")]
+        graph: String,
+        /// Deterministic offline echo invoker (no model, no network).
+        #[arg(long)]
+        offline: bool,
+        /// Extra automatic attempts per turn: a number, or 'auto' (3).
+        #[arg(long)]
+        retry: Option<String>,
+        /// Resume an existing session instead of starting a new one.
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Replay a run journal: fold the event stream into a summary.
     Replay {
         /// Path to a .journal file produced by `graffy run`.
@@ -198,7 +214,17 @@ enum GraphCommand {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let tui_active = matches!(
+        &cli.command,
+        None | Some(Command::Tui)
+            | Some(Command::Run { tui: true, .. })
+            | Some(Command::Replay { tui: true, .. })
+    );
     let default_filter = match cli.verbose {
+        // Log lines written over a live TUI corrupt it; the journal is the record.
+        0 if tui_active => "off",
+        // Chat prints its own step progress; raw log lines would bury the conversation.
+        0 if matches!(&cli.command, Some(Command::Chat { .. })) => "warn",
         0 => "info",
         1 => "debug",
         _ => "trace",
@@ -236,6 +262,12 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
+        Command::Chat {
+            graph,
+            offline,
+            retry,
+            session,
+        } => chat(graph, offline, retry, session).await,
         Command::Replay {
             journal,
             tui,
@@ -568,17 +600,8 @@ async fn run_graph(
     let spec = GraphSpec::from_toml_str(&spec_text)?;
     // Validate before starting any provider or MCP transport.
     graffy_core::graph::CompiledGraph::compile(&spec)?;
-    let retries = match retry.as_deref() {
-        None => 0,
-        Some("auto") => DEFAULT_AUTO_RETRIES,
-        Some(n) => n
-            .parse::<u32>()
-            .map_err(|_| anyhow::anyhow!("--retry takes a number or 'auto', got '{n}'"))?,
-    };
-    let max_attempts = retries
-        .checked_add(1)
-        .ok_or_else(|| anyhow::anyhow!("--retry is too large"))?;
-    if tui && (retries > 0 || session.is_some() || correction) {
+    let max_attempts = max_attempts_from(retry.as_deref())?;
+    if tui && (max_attempts > 1 || session.is_some() || correction) {
         anyhow::bail!("--retry, --session and --correction require plain CLI mode in alpha.6");
     }
     if correction && session.is_none() {
@@ -590,37 +613,12 @@ async fn run_graph(
         );
     }
     let prior_boundary = match &session {
-        Some(id) => {
-            let runs = load_session_runs(&runs_dir(), id).await?;
-            if runs.is_empty() {
-                anyhow::bail!("unknown session '{id}'; omit --session to start a new conversation");
-            }
-            let projection = graffy_core::boundary::project(&runs);
-            if projection
-                .turns
-                .iter()
-                .any(|t| t.visibility != graffy_core::boundary::Visibility::Visible)
-            {
-                eprintln!(
-                    "warning: history includes unconfirmed delivery; those contributions are excluded from model context"
-                );
-            }
-            graffy_core::boundary::hydration_from(&projection)
-        }
+        Some(id) => hydrate_history(id).await?,
         None => Vec::new(),
     };
     let invoker = build_invoker(offline);
     let turn_started = std::time::Instant::now();
-    let tool_plane = if let Some(seconds) = spec.policy.budget.max_seconds {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(seconds),
-            build_tool_plane(&spec),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("run deadline exhausted while connecting tools"))??
-    } else {
-        build_tool_plane(&spec).await?
-    };
+    let tool_plane = connect_tools(&spec).await?;
     let cancellation = graffy_core::control::Cancellation::default();
     // Both frontends drive the same runner (ADR-0010): only rendering differs.
     let turn = turn::Turn {
@@ -653,7 +651,7 @@ async fn run_graph(
         })
         .await?
         .ok_or_else(|| anyhow::anyhow!("run failed; see the journal"))?;
-        report_outcome(&spec, &spec_text, &outcome).await?;
+        report_outcome(&spec, &spec_text, &outcome, false).await?;
         if outcome.status != wire::RunStatus::Succeeded {
             anyhow::bail!("run ended {:?}", outcome.status);
         }
@@ -666,73 +664,305 @@ async fn run_graph(
         }
     });
     let mut runner = turn::TurnRunner::new(turn);
-    let result = async {
-        loop {
-            let outcome = runner
-                .attempt(|attempt, max| {
+    let result = drive_turn(&spec, &spec_text, &mut runner, false, &mut None).await;
+    signal_task.abort();
+    result?;
+    println!(
+        "continue session: graffy run {spec_arg} --prompt \"...\" --session {}",
+        runner.session_id().unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// `--retry` → total attempts per turn (the first attempt plus retries).
+fn max_attempts_from(retry: Option<&str>) -> anyhow::Result<u32> {
+    let retries = match retry {
+        None => 0,
+        Some("auto") => DEFAULT_AUTO_RETRIES,
+        Some(n) => n
+            .parse::<u32>()
+            .map_err(|_| anyhow::anyhow!("--retry takes a number or 'auto', got '{n}'"))?,
+    };
+    retries
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("--retry is too large"))
+}
+
+/// Visible boundary history of an existing session, for model context.
+/// Unknown sessions and unreadable history fail loudly — never "empty".
+async fn hydrate_history(session: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let runs = load_session_runs(&runs_dir(), session).await?;
+    if runs.is_empty() {
+        anyhow::bail!("unknown session '{session}'; omit --session to start a new conversation");
+    }
+    let projection = graffy_core::boundary::project(&runs);
+    if projection
+        .turns
+        .iter()
+        .any(|t| t.visibility != graffy_core::boundary::Visibility::Visible)
+    {
+        eprintln!(
+            "warning: history includes unconfirmed delivery; those contributions are excluded from model context"
+        );
+    }
+    Ok(graffy_core::boundary::hydration_from(&projection))
+}
+
+/// Connect the graph's tool plane, bounded by the graph's own time budget.
+async fn connect_tools(spec: &GraphSpec) -> anyhow::Result<Option<Arc<dyn ToolInvoker>>> {
+    match spec.policy.budget.max_seconds {
+        Some(seconds) => tokio::time::timeout(
+            std::time::Duration::from_secs(seconds),
+            build_tool_plane(spec),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("run deadline exhausted while connecting tools"))?,
+        None => build_tool_plane(spec).await,
+    }
+}
+
+/// Plain-terminal rendering of one turn: run attempts until the graph
+/// releases an answer or the turn honestly ends with nothing released.
+async fn drive_turn(
+    spec: &GraphSpec,
+    spec_text: &str,
+    runner: &mut turn::TurnRunner,
+    compact: bool,
+    progress: &mut Option<tokio::sync::mpsc::UnboundedReceiver<wire::RunEvent>>,
+) -> anyhow::Result<()> {
+    // Step progress goes to stderr so stdout stays the conversation itself.
+    fn show(frame: &wire::RunEvent) {
+        if let Some(wire::run_event::Event::NodeTransition(t)) = &frame.event
+            && t.to == wire::NodeState::Running as i32
+        {
+            eprintln!("  · step: {}", t.node_id);
+        }
+    }
+    loop {
+        let outcome = {
+            let attempt = runner.attempt(|attempt, max| {
+                if !compact {
                     println!(
                         "graph '{}' v{} — executing (attempt {attempt}/{max}, every step journaled)",
                         spec.graph.name, spec.graph.version
                     )
-                })
-                .await?;
-            report_outcome(&spec, &spec_text, &outcome).await?;
-            match runner.verdict(&outcome)? {
-                turn::Verdict::Released => {
-                    if runner.attempt_number() > 1 {
-                        println!(
-                            "converged on attempt {}/{} (internal execution only)",
-                            runner.attempt_number(),
-                            runner.max_attempts()
-                        );
-                    }
-                    println!(
-                        "continue session: graffy run {spec_arg} --prompt \"...\" --session {}",
-                        runner.session_id().unwrap_or_default()
-                    );
-                    return Ok(());
                 }
-                turn::Verdict::Retry => println!(
-                    "retrying with recorded review feedback (whole-turn budget still applies)"
-                ),
+            });
+            tokio::pin!(attempt);
+            loop {
+                tokio::select! {
+                    Some(frame) = async {
+                        match progress.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => show(&frame),
+                    outcome = &mut attempt => break outcome?,
+                }
+            }
+        };
+        // Everything the attempt recorded is shown before its answer is.
+        while let Some(frame) = progress.as_mut().and_then(|rx| rx.try_recv().ok()) {
+            show(&frame);
+        }
+        report_outcome(spec, spec_text, &outcome, compact).await?;
+        match runner.verdict(&outcome)? {
+            turn::Verdict::Released => {
+                if runner.attempt_number() > 1 {
+                    println!(
+                        "converged on attempt {}/{} (internal execution only)",
+                        runner.attempt_number(),
+                        runner.max_attempts()
+                    );
+                }
+                return Ok(());
+            }
+            turn::Verdict::Retry => {
+                println!("retrying with recorded review feedback (whole-turn budget still applies)")
             }
         }
     }
-    .await;
+}
+
+/// `graffy chat`: a line-at-a-time conversation where every line is one turn
+/// through the shared runner. Works piped (EOF ends the chat; it never
+/// approves or sends anything).
+async fn chat(
+    graph: String,
+    offline: bool,
+    retry: Option<String>,
+    mut session: Option<String>,
+) -> anyhow::Result<()> {
+    use std::io::{IsTerminal, Write};
+    let spec_text = resolve_spec(&graph).await?;
+    let spec = GraphSpec::from_toml_str(&spec_text)?;
+    graffy_core::graph::CompiledGraph::compile(&spec)?;
+    let max_attempts = max_attempts_from(retry.as_deref())?;
+    if let Some(id) = &session {
+        // Resuming restores the recorded transcript; it re-executes nothing.
+        for (actor, content) in hydrate_history(id).await? {
+            println!("{actor}> {content}");
+        }
+    }
+    let invoker = build_invoker(offline);
+    let tools = connect_tools(&spec).await?;
+    println!(
+        "graffy chat — graph '{}' v{}. Every message runs as a journaled graph.\n\
+         /correct <text> sends a correction · /quit or end-of-input leaves · Ctrl-C stops the current turn",
+        spec.graph.name, spec.graph.version
+    );
+
+    // Ctrl-C cancels the turn in flight; with no turn running it leaves chat.
+    let active: Arc<std::sync::Mutex<Option<graffy_core::control::Cancellation>>> =
+        Default::default();
+    let active_for_signal = active.clone();
+    let signal_task = tokio::spawn(async move {
+        while tokio::signal::ctrl_c().await.is_ok() {
+            match active_for_signal.lock().unwrap().as_ref() {
+                Some(cancellation) => cancellation.cancel(),
+                None => std::process::exit(130),
+            }
+        }
+    });
+
+    let (tap, progress) = tokio::sync::mpsc::unbounded_channel();
+    let mut progress = Some(progress);
+    let interactive = std::io::stdin().is_terminal();
+    let mut unreleased = 0u32;
+    loop {
+        if interactive {
+            print!("\nyou> ");
+            std::io::stdout().flush()?;
+        }
+        // ponytail: the approval prompt reads stdin from a detached thread; an
+        // approval abandoned by a deadline can swallow the next chat line
+        // (docs/KNOWN-ISSUES.md). One owned stdin reader fixes it if it bites.
+        let line = tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).map(|n| (n, line))
+        })
+        .await??;
+        let (read, text) = line;
+        if read == 0 {
+            break; // end of input: leave without sending anything
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if text == "/quit" {
+            break;
+        }
+        let (prompt, correction) = match text.strip_prefix("/correct ") {
+            Some(rest) => (rest.trim(), true),
+            None => (text, false),
+        };
+        if correction && session.is_none() {
+            eprintln!("nothing to correct yet: /correct needs an earlier turn in this chat");
+            continue;
+        }
+        let prior_boundary = match &session {
+            Some(id) => match hydrate_history(id).await {
+                Ok(history) => history,
+                Err(err) => {
+                    unreleased += 1;
+                    eprintln!("turn not started: {err}");
+                    continue;
+                }
+            },
+            None => Vec::new(),
+        };
+        let cancellation = graffy_core::control::Cancellation::default();
+        *active.lock().unwrap() = Some(cancellation.clone());
+        let mut runner = turn::TurnRunner::new(turn::Turn {
+            spec: spec.clone(),
+            spec_text: spec_text.clone(),
+            prompt: prompt.to_owned(),
+            correction,
+            session: session.clone(),
+            prior_boundary,
+            max_attempts,
+            journal: None,
+            runs_dir: runs_dir(),
+            started: std::time::Instant::now(),
+            invoker: invoker.clone(),
+            tools: tools.clone(),
+            approvals: Arc::new(CliApprovalHandler),
+            cancellation,
+            event_tap: Some(tap.clone()),
+        });
+        let result = drive_turn(&spec, &spec_text, &mut runner, true, &mut progress).await;
+        *active.lock().unwrap() = None;
+        if let Some(id) = runner.session_id() {
+            session = Some(id.to_owned());
+        }
+        if let Err(err) = result {
+            unreleased += 1;
+            eprintln!("turn failed: {err}");
+        }
+    }
     signal_task.abort();
-    result
+    if let Some(id) = &session {
+        println!("\nresume this chat: graffy chat --session {id}");
+    }
+    if unreleased > 0 {
+        anyhow::bail!("{unreleased} turn(s) released no answer");
+    }
+    Ok(())
 }
 
 async fn report_outcome(
     spec: &GraphSpec,
     spec_text: &str,
     outcome: &RunOutcome,
+    compact: bool,
 ) -> anyhow::Result<()> {
     use std::io::Write;
     let delivered = (|| -> anyhow::Result<()> {
         let stdout = std::io::stdout();
         let mut output = stdout.lock();
-        writeln!(
-            output,
-            "\nrun     : {}\nsession : {}\nstatus  : {:?}",
-            outcome.run_id, outcome.session_id, outcome.status
-        )?;
-        writeln!(
-            output,
-            "tokens  : {} in / {} out   cost: unavailable (pricing not configured)   wall: {}ms",
-            outcome.input_tokens, outcome.output_tokens, outcome.duration_ms
-        )?;
-        for note in &outcome.notes {
-            writeln!(output, "note    : {note}")?;
+        if compact {
+            // Chat shows the conversation; run details stay one replay away.
+            if outcome.status != wire::RunStatus::Succeeded {
+                writeln!(
+                    output,
+                    "attempt ended {:?}; no answer released",
+                    outcome.status
+                )?;
+                for note in &outcome.notes {
+                    writeln!(output, "note    : {note}")?;
+                }
+            }
+        } else {
+            writeln!(
+                output,
+                "\nrun     : {}\nsession : {}\nstatus  : {:?}",
+                outcome.run_id, outcome.session_id, outcome.status
+            )?;
+            writeln!(
+                output,
+                "tokens  : {} in / {} out   cost: unavailable (pricing not configured)   wall: {}ms",
+                outcome.input_tokens, outcome.output_tokens, outcome.duration_ms
+            )?;
+            for note in &outcome.notes {
+                writeln!(output, "note    : {note}")?;
+            }
+            writeln!(
+                output,
+                "journal : {}\ninspect : graffy replay \"{}\" --tui",
+                outcome.journal_path.display(),
+                outcome.journal_path.display()
+            )?;
         }
-        writeln!(
-            output,
-            "journal : {}\ninspect : graffy replay \"{}\" --tui",
-            outcome.journal_path.display(),
-            outcome.journal_path.display()
-        )?;
         if outcome.status == wire::RunStatus::Succeeded && outcome.final_text.is_some() {
             JournalWriter::deliver_response(&outcome.journal_path, &outcome.run_id, &mut output)?;
+        }
+        if compact {
+            writeln!(
+                output,
+                "details : graffy replay \"{}\" --tui",
+                outcome.journal_path.display()
+            )?;
         }
         output.flush()?;
         Ok(())
