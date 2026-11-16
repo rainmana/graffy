@@ -292,11 +292,16 @@ struct ActiveTurn {
 
 /// Run the conversation view until the user leaves.
 ///
+/// * `spec` — the graph a turn runs on unless something else selects one;
+///   shown in the header until a run says otherwise.
+/// * `spec_for` — the spec of a graph id, so run details describe the graph
+///   that actually executed (with routing, that differs turn by turn).
 /// * `history` — the recorded visible transcript of a resumed session.
 /// * `start` — executes one turn; must go through the shared turn runner.
 /// * `new_session` — the user asked for a fresh conversation (`/new`).
 pub async fn run_chat<S, Fut, N>(
     spec: &GraphSpec,
+    spec_for: impl Fn(&str) -> Option<GraphSpec>,
     history: Vec<(String, String)>,
     mut session: Option<String>,
     mut start: S,
@@ -330,9 +335,13 @@ where
         loop {
             if let Some(turn) = &mut active {
                 while let Ok(frame) = turn.tap.try_recv() {
-                    if matches!(frame.event, Some(wire::run_event::Event::RunStarted(_))) {
+                    if let Some(wire::run_event::Event::RunStarted(manifest)) = &frame.event {
                         app = AppState::default();
-                        app.seed_from_spec(spec);
+                        // Seed from the graph this run names, never from an
+                        // assumed one; an unknown graph is shown unseeded.
+                        if let Some(running) = spec_for(&manifest.graph_id) {
+                            app.seed_from_spec(&running);
+                        }
                     }
                     app.apply(&frame);
                 }
@@ -525,12 +534,23 @@ fn draw_chat(
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" graffy chat ", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "· {} v{} · session {}",
-                spec.graph.name,
-                spec.graph.version,
-                session.unwrap_or("not started")
-            )),
+            // Name the graph of the latest run once there is one: with
+            // routing it can differ from the chat's floor graph.
+            Span::raw(if app.graph_name.is_empty() {
+                format!(
+                    "· {} v{} · session {}",
+                    spec.graph.name,
+                    spec.graph.version,
+                    session.unwrap_or("not started")
+                )
+            } else {
+                format!(
+                    "· {} v{} · session {}",
+                    app.graph_name,
+                    app.graph_version,
+                    session.unwrap_or("not started")
+                )
+            }),
         ])),
         header,
     );
@@ -706,6 +726,21 @@ mod tests {
         ] {
             assert!(screen.contains(words), "missing {words:?}");
         }
+        // After a run on another graph, the header names that graph.
+        let mut routed = AppState::default();
+        routed.graph_name = "Decision Framework".into();
+        routed.graph_version = "0.1.0".into();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| draw_chat(f, &spec, Some("ses_1"), &chat, &routed, &ui))
+            .unwrap();
+        let header: String = terminal.backend().buffer().content[..80]
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(header.contains("Decision Framework v0.1.0"), "{header}");
+        assert!(!header.contains("Default Conversation"));
         // Resize down to almost nothing: must not panic.
         for (width, height) in [(20, 6), (4, 3), (1, 1)] {
             render(width, height);

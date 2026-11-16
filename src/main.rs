@@ -2436,6 +2436,16 @@ impl ChatGraphs {
         })
     }
 
+    /// The spec of a graph this chat can run, by id — so a view describes the
+    /// graph that actually executed rather than assuming the floor.
+    fn spec_for(&self, graph_id: &str) -> Option<GraphSpec> {
+        if graph_id == self.floor.spec.graph.id {
+            return Some(self.floor.spec.clone());
+        }
+        let router = self.router.as_ref()?;
+        router.specs.get(graph_id).map(|(spec, _)| spec.clone())
+    }
+
     /// One plain line naming what the router can choose from.
     fn describe(&self) -> String {
         match &self.router {
@@ -2558,8 +2568,10 @@ async fn chat_tui(
     let for_turns = current.clone();
     let for_reset = current.clone();
     let view_spec = graphs.floor.spec.clone();
+    let for_view = graphs.clone();
     graffy_tui::run_chat(
         &view_spec,
+        move |graph_id| for_view.spec_for(graph_id),
         history,
         session,
         move |turn: graffy_tui::ChatTurn, tap, approvals, cancellation| {
