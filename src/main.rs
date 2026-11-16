@@ -123,10 +123,21 @@ enum Command {
         #[arg(long)]
         tui: bool,
         /// Route each message onto a registered graph that opted in with
-        /// `route_on` trigger phrases (ADR-0012); anything else runs as plain
-        /// conversation. Start a message with `/chat ` to skip routing.
-        #[arg(long, conflicts_with = "graph")]
-        route: bool,
+        /// `route_on` (ADR-0012); anything else runs as plain conversation.
+        /// `--route` matches trigger phrases. `--route=decider` asks a
+        /// decision model instead (GRAFFY_DECIDER_URL, GRAFFY_DECIDER_MODEL,
+        /// GRAFFY_DECIDER_API_KEY, GRAFFY_ROUTER_MIN_CONFIDENCE) — your
+        /// messages are sent to that endpoint. Start a message with `/chat `
+        /// to skip routing.
+        #[arg(
+            long,
+            conflicts_with = "graph",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "phrases",
+            value_parser = ["phrases", "decider"]
+        )]
+        route: Option<String>,
     },
     /// Replay a run journal: fold the event stream into a summary.
     Replay {
@@ -512,8 +523,8 @@ fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
     );
     if aggregate.routing_runs > 0 {
         println!(
-            "routing : {} routing run(s) — counted here only, never as execution runs",
-            aggregate.routing_runs
+            "routing : {} routing run(s), {} decision-model token(s) — counted here only, never as execution runs",
+            aggregate.routing_runs, aggregate.routing_tokens
         );
     }
     if aggregate.rating_observations > 0 {
@@ -835,9 +846,10 @@ async fn chat(
     retry: Option<String>,
     mut session: Option<String>,
     tui: bool,
-    route: bool,
+    route: Option<String>,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
+    let (route, route_mode) = (route.is_some(), route);
     use std::io::{IsTerminal, Write};
     if tui && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         anyhow::bail!("chat --tui needs a terminal; plain `graffy chat` works with piped input");
@@ -882,10 +894,19 @@ async fn chat(
     }
     let invoker = build_invoker(offline);
     let tools = connect_tools(&spec).await?;
-    let graphs = Arc::new(ChatGraphs::load(spec.clone(), spec_text.clone(), tools, route).await?);
+    let graphs = Arc::new(
+        ChatGraphs::load(
+            spec.clone(),
+            spec_text.clone(),
+            tools,
+            route_mode.as_deref(),
+        )
+        .await?,
+    );
     // Repeat how this chat was started so the printed command resumes it alike.
     let resume_flags = match (&graph, route) {
         (Some(pinned), _) => format!(" --graph \"{pinned}\""),
+        (None, true) if route_mode.as_deref() == Some("decider") => " --route=decider".to_owned(),
         (None, true) => " --route".to_owned(),
         (None, false) => String::new(),
     };
@@ -2382,6 +2403,8 @@ struct PromptRouter {
     candidates: Vec<graffy_core::route::RouteCandidate>,
     /// Opted-in specs by graph id.
     specs: std::collections::HashMap<String, (GraphSpec, String)>,
+    /// `Some`: a decision model chooses (`--route=decider`).
+    decider: Option<graffy_core::route::DeciderRouting>,
     /// Tool planes are connected on first use and reused for the chat.
     tools: tokio::sync::Mutex<std::collections::HashMap<String, Option<Arc<dyn ToolInvoker>>>>,
 }
@@ -2391,7 +2414,7 @@ impl ChatGraphs {
         spec: GraphSpec,
         spec_text: String,
         tools: Option<Arc<dyn ToolInvoker>>,
-        route: bool,
+        route: Option<&str>,
     ) -> anyhow::Result<Self> {
         let floor = TurnGraph {
             spec,
@@ -2400,12 +2423,16 @@ impl ChatGraphs {
             routed_by: None,
             note: None,
         };
-        if !route {
+        let Some(mode) = route else {
             return Ok(Self {
                 floor,
                 router: None,
             });
-        }
+        };
+        let decider = match mode {
+            "decider" => Some(decider_from_env()?),
+            _ => None,
+        };
         let spec_text = resolve_spec("graffy.builtin.router").await?;
         let spec = GraphSpec::from_toml_str(&spec_text)?;
         graffy_core::graph::CompiledGraph::compile(&spec)?;
@@ -2421,6 +2448,11 @@ impl ChatGraphs {
                 graph_id: candidate.graph.id.clone(),
                 name: candidate.graph.name.clone(),
                 route_on: candidate.graph.route_on.clone(),
+                route_when: candidate
+                    .graph
+                    .route_when
+                    .clone()
+                    .unwrap_or_else(|| candidate.graph.description.clone()),
             });
             specs.insert(candidate.graph.id.clone(), (candidate, record.spec_toml));
         }
@@ -2431,6 +2463,7 @@ impl ChatGraphs {
                 spec_text,
                 candidates,
                 specs,
+                decider,
                 tools: Default::default(),
             }),
         })
@@ -2452,15 +2485,27 @@ impl ChatGraphs {
             Some(router) if router.candidates.is_empty() => {
                 "routing : on, but no registered graph declares route_on phrases — every message runs as plain conversation".into()
             }
-            Some(router) => format!(
-                "routing : on — may choose {}. Start a message with /chat to use plain conversation instead.",
-                router
+            Some(router) => {
+                let names = router
                     .candidates
                     .iter()
                     .map(|c| format!("'{}'", c.name))
                     .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+                    .join(", ");
+                match &router.decider {
+                    // The prompt leaves this process: say where, up front.
+                    Some(routing) => format!(
+                        "routing : on — a decision model at {} may choose {names}; picks below confidence {:.2} are not followed.\n\
+                         routing : every routed message is SENT to {}. Start a message with /chat to keep it out of routing.",
+                        routing.decider.endpoint(),
+                        routing.min_confidence,
+                        routing.decider.endpoint()
+                    ),
+                    None => format!(
+                        "routing : on — may choose {names}. Start a message with /chat to use plain conversation instead."
+                    ),
+                }
+            }
             None => String::new(),
         }
     }
@@ -2487,7 +2532,10 @@ impl ChatGraphs {
                     graph_id: self.floor.spec.graph.id.clone(),
                     name: self.floor.spec.graph.name.clone(),
                     route_on: Vec::new(),
+                    route_when: "Ordinary conversation, or none of the other options clearly fits."
+                        .into(),
                 },
+                decider: router.decider.clone(),
             }),
         );
         let executor = graffy_core::exec::Executor {
@@ -2553,6 +2601,35 @@ impl ChatGraphs {
         chosen.note = Some(decision.reason);
         Ok(chosen)
     }
+}
+
+/// The decision-model router's configuration, from the environment. Nothing
+/// is defaulted: no endpoint, no model, and no confidence threshold — graffy
+/// has no evidence for a threshold on its own prompts (ADR-0012).
+fn decider_from_env() -> anyhow::Result<graffy_core::route::DeciderRouting> {
+    let decider = graffy_providers::decider::HttpDecider::from_env()
+        .map_err(|err| anyhow::anyhow!("--route=decider: {err}"))?;
+    let raw = std::env::var("GRAFFY_ROUTER_MIN_CONFIDENCE").map_err(|_| {
+        anyhow::anyhow!(
+            "--route=decider: GRAFFY_ROUTER_MIN_CONFIDENCE is not set. Choose the confidence \
+             (between 0 and 1) below which the decision model's pick is ignored and plain \
+             conversation runs; graffy ships no default."
+        )
+    })?;
+    let min_confidence = raw
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| (0.0..=1.0).contains(v))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "GRAFFY_ROUTER_MIN_CONFIDENCE must be a number between 0 and 1, got '{raw}'"
+            )
+        })?;
+    Ok(graffy_core::route::DeciderRouting {
+        decider: Arc::new(decider),
+        min_confidence,
+    })
 }
 
 /// `graffy chat --tui`: the Ratatui conversation view over the same turn

@@ -223,7 +223,10 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
-    fn router_executor(candidates: Vec<graffy_core::route::RouteCandidate>) -> Executor {
+    fn router_executor(
+        candidates: Vec<graffy_core::route::RouteCandidate>,
+        decider: Option<graffy_core::route::DeciderRouting>,
+    ) -> Executor {
         let mut registry = graffy_core::exec::NodeRegistry::with_defaults();
         registry.register(
             "router",
@@ -233,7 +236,9 @@ mod tests {
                     graph_id: "graffy.builtin.conversation".into(),
                     name: "Default Conversation".into(),
                     route_on: Vec::new(),
+                    route_when: "Ordinary conversation.".into(),
                 },
+                decider,
             }),
         );
         Executor {
@@ -255,6 +260,7 @@ mod tests {
                 graph_id: meta.id,
                 name: meta.name,
                 route_on: meta.route_on,
+                route_when: meta.route_when.unwrap_or(meta.description),
             })
             .collect();
         assert!(
@@ -265,7 +271,7 @@ mod tests {
             "the router and the conversation floors stay explicit-only"
         );
         let path = temp_path("router");
-        let outcome = router_executor(candidates)
+        let outcome = router_executor(candidates, None)
             .run(
                 &spec,
                 super::ROUTER_TOML,
@@ -328,5 +334,167 @@ mod tests {
         };
         assert!(failed);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A scripted decision model: no network, a recorded call count.
+    struct ScriptedDecider {
+        answer: Result<(&'static str, f64), &'static str>,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl graffy_core::route::Decider for ScriptedDecider {
+        fn endpoint(&self) -> &str {
+            "decider.test"
+        }
+        async fn choose(
+            &self,
+            _content: &str,
+            _instructions: &str,
+            choices: &std::collections::BTreeMap<String, String>,
+        ) -> Result<graffy_core::route::DeciderAnswer, graffy_core::route::DeciderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                choices.contains_key("graffy.builtin.conversation"),
+                "the floor is always offered"
+            );
+            assert!(
+                choices.values().all(|when| !when.is_empty()),
+                "every choice has a criterion"
+            );
+            let (choice, confidence) = self
+                .answer
+                .map_err(|e| graffy_core::route::DeciderError(e.to_owned()))?;
+            Ok(graffy_core::route::DeciderAnswer {
+                choice: choice.to_owned(),
+                confidence,
+                probabilities: [(choice.to_owned(), confidence)].into(),
+                model: "scripted-1".into(),
+                input_tokens: 40,
+                output_tokens: 1,
+                latency_ms: 3,
+            })
+        }
+    }
+
+    fn opted_in() -> Vec<graffy_core::route::RouteCandidate> {
+        super::builtin_specs()
+            .iter()
+            .map(|(_, toml)| GraphSpec::from_toml_str(toml).unwrap().graph)
+            .filter(|meta| !meta.route_on.is_empty())
+            .map(|meta| graffy_core::route::RouteCandidate {
+                graph_id: meta.id,
+                name: meta.name,
+                route_on: meta.route_on,
+                route_when: meta.route_when.unwrap_or(meta.description),
+            })
+            .collect()
+    }
+
+    /// Run the router graph with a scripted decider at threshold 0.9.
+    async fn decide(
+        answer: Result<(&'static str, f64), &'static str>,
+        candidates: Vec<graffy_core::route::RouteCandidate>,
+    ) -> (
+        Option<wire::RunStatus>,
+        Option<wire::GraphRoutingDecision>,
+        u32,
+        u64,
+    ) {
+        let decider = std::sync::Arc::new(ScriptedDecider {
+            answer,
+            calls: Default::default(),
+        });
+        let spec = GraphSpec::from_toml_str(super::ROUTER_TOML).unwrap();
+        let path = temp_path("decider");
+        let result = router_executor(
+            candidates,
+            Some(graffy_core::route::DeciderRouting {
+                decider: decider.clone(),
+                min_confidence: 0.9,
+            }),
+        )
+        .run(
+            &spec,
+            super::ROUTER_TOML,
+            RunInput {
+                // No trigger phrase here: only the model can pick a graph.
+                prompt: "Should I rent or buy a flat?".into(),
+                run_kind: wire::RunKind::Routing as i32,
+                ..Default::default()
+            },
+            &path,
+            &OfflineEcho,
+            &AutoApprove,
+        )
+        .await;
+        let events = JournalReader::read_all(&path).unwrap_or_default();
+        std::fs::remove_file(&path).ok();
+        (
+            result.as_ref().ok().map(|o| o.status),
+            graffy_core::route::decision_from(&events),
+            decider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            result.map_or(0, |o| o.input_tokens),
+        )
+    }
+
+    const DECISION: &str = "graffy.builtin.reasoning.decision-framework";
+
+    #[tokio::test]
+    async fn decider_pick_is_followed_only_at_or_above_the_humans_threshold() {
+        let (status, decision, calls, tokens) = decide(Ok((DECISION, 0.97)), opted_in()).await;
+        let decision = decision.unwrap();
+        assert_eq!(status, Some(wire::RunStatus::Succeeded));
+        assert_eq!(
+            (decision.router.as_str(), decision.chosen_graph_id.as_str()),
+            ("decider", DECISION)
+        );
+        assert!(!decision.fallback);
+        // What the model reported is journaled as its report, with the threshold.
+        assert_eq!(
+            (decision.confidence, decision.min_confidence),
+            (Some(0.97), Some(0.9))
+        );
+        assert_eq!(decision.decided_by_model, "scripted-1");
+        assert_eq!(decision.decided_at_endpoint, "decider.test");
+        assert_eq!(
+            (calls, tokens),
+            (1, 40),
+            "one call, counted against the run"
+        );
+
+        // Same pick, lower confidence: not followed, and the lean is disclosed.
+        let (_, decision, _, _) = decide(Ok((DECISION, 0.62)), opted_in()).await;
+        let decision = decision.unwrap();
+        assert!(decision.fallback);
+        assert_eq!(decision.chosen_graph_id, "graffy.builtin.conversation");
+        assert_eq!(decision.matched, vec![DECISION.to_owned()]);
+        assert!(
+            decision.reason.contains("0.62")
+                && decision.reason.contains("below your threshold 0.90")
+        );
+
+        // The model may also choose plain conversation outright.
+        let (_, decision, _, _) =
+            decide(Ok(("graffy.builtin.conversation", 0.99)), opted_in()).await;
+        assert!(decision.unwrap().fallback);
+    }
+
+    #[tokio::test]
+    async fn decider_failures_fail_the_routing_run_instead_of_degrading() {
+        // Unreachable model: no silent switch to phrases or to the floor.
+        let (status, decision, _, _) = decide(Err("connection refused"), opted_in()).await;
+        assert_ne!(status, Some(wire::RunStatus::Succeeded));
+        assert!(decision.is_none());
+        // An answer outside the offered graphs, or an impossible confidence.
+        for bad in [("graffy.not.offered", 0.99), (DECISION, 1.7)] {
+            let (status, decision, _, _) = decide(Ok(bad), opted_in()).await;
+            assert_ne!(status, Some(wire::RunStatus::Succeeded));
+            assert!(decision.is_none());
+        }
+        // Nothing opted in: the prompt is not sent anywhere at all.
+        let (status, decision, calls, _) = decide(Ok((DECISION, 0.99)), Vec::new()).await;
+        assert_eq!((status, calls), (Some(wire::RunStatus::Succeeded), 0));
+        assert!(decision.unwrap().fallback);
     }
 }

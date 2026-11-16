@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Decision-model router (ADR-0012; owner's idea):** `graffy chat --route=decider`
+  asks a small decision model which opted-in graph a message should run on,
+  instead of matching trigger phrases. One HTTP adapter
+  (`graffy_providers::decider`) speaks the `/v1/systemone` shape shared by
+  TypeSafe's hosted Jev and a local Strands Decider server. Configuration is
+  explicit and nothing is defaulted: `GRAFFY_DECIDER_URL`, optional
+  `GRAFFY_DECIDER_MODEL` and `GRAFFY_DECIDER_API_KEY`, and a required
+  `GRAFFY_ROUTER_MIN_CONFIDENCE` — a pick the model reports below that confidence
+  is not followed. The chat states up front where routed messages are sent; the
+  journal records the model's own reported choice, confidence and probabilities,
+  the answering model, the endpoint and the threshold; the call is journaled as a
+  model call and its tokens are reported separately by `graffy metrics`
+  (`routing_tokens`). A decider that is unreachable or answers unusably fails the
+  turn loudly — it never falls back to phrases. Plain `http://` is accepted only
+  for this machine. Graphs may add `route_when = "…"`, the criterion the model is
+  given; only graphs with `route_on` are offered.
 - **Prompt-to-graph routing, deterministic (ADR-0012, issue #17):**
   `graffy chat --route` (plain and `--tui`) routes each message onto a registered
   graph that opted in with `route_on` trigger phrases in its `[graph]` table.

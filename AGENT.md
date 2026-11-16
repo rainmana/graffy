@@ -147,9 +147,12 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
   run (kind ROUTING — never a turn; keep it out of every history, exchange and
   execution-metric path, like rating runs). Graphs opt in with `route_on`;
   absent means explicit-only. The `router` node is registered by the frontend
-  with the catalog, not in the default registry. Next: the decision-model
-  router (Jev / Strands Decider) behind a seam — no hardcoded model or
-  endpoint, and no invented confidence threshold. The TUI chat has been exercised in a
+  with the catalog, not in the default registry. `--route=decider` asks a
+  decision model through the `graffy_core::route::Decider` seam (HTTP adapter:
+  `graffy-providers/src/decider.rs`; Jev or a local Strands Decider). It has no
+  defaults by design — endpoint, model and `GRAFFY_ROUTER_MIN_CONFIDENCE` are
+  all the human's to set — and it fails loudly rather than degrade. Still open
+  under issue #17: graphify-on-the-fly, embeddings, mis-routes as Lessons. The TUI chat has been exercised in a
   pseudo-terminal and by render tests, not yet by a human on real terminals.
   Desktop/web is tabled indefinitely. The optional graph inspection view is not
   a prerequisite for chat.
@@ -168,6 +171,7 @@ cargo run -- run graffy.builtin.conversation --prompt "hi" --offline --tui
 cargo run -- chat --offline                  # terminal chat; every line is a graph turn (src/turn.rs)
 cargo run -- chat --offline --tui            # Ratatui conversation view (crates/graffy-tui/src/ui/chat.rs)
 cargo run -- chat --offline --route          # route messages onto opted-in graphs (crates/graffy-core/src/route.rs)
+cargo run -- chat --route=decider            # same, chosen by a decision model (needs GRAFFY_DECIDER_URL + GRAFFY_ROUTER_MIN_CONFIDENCE)
 cargo run -- run <graph> --prompt "..." --retry auto   # C2 repair-feedback retries
 cargo run -- rate <session-id> [--blinded]   # boundary-transcript HRDM rating (calibration)
 cargo run -- run <graph> --prompt "..." --session <id>  # continue a session (adds an exchange)

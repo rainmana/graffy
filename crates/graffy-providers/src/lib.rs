@@ -24,6 +24,8 @@
 //! only reachable path to it is a scheduled graph node. Completions are
 //! wrapped into Information Units by the node behaviors in graffy-core.
 
+pub mod decider;
+
 use std::collections::HashMap;
 use std::time::Instant;
 

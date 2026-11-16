@@ -63,6 +63,9 @@ crossterm = "0.29"
 
 # --- pinned now, wired in later phases ---
 rmcp = { version = "3.1", default-features = false, features = ["client", "transport-child-process", "transport-io"] } # official Rust MCP SDK — graffy-mcp
+# Direct HTTP for the decision-model router (graffy-providers). Same version
+# rig-core already resolves, so no new crate enters the tree — MIT OR Apache-2.0.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde_json = "1.0"       # MCP tool arguments/results (graffy-mcp)
 fastembed = "6.0"        # local ONNX embeddings — graffy-memory, Phase 3
 
