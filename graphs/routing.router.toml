@@ -1,0 +1,46 @@
+# graffy graph spec v0 — the built-in PROMPT ROUTER (ADR-0012).
+#
+# Routing is itself a lawful, journaled graph run. It selects which registered
+# graph an external prompt should run on and records why. It never answers the
+# prompt, and its run is never a conversation turn (run kind: routing).
+#
+# A graph is eligible only if its own spec declares `route_on` trigger phrases.
+# This graph declares none: the router is never routed onto.
+
+[graph]
+id = "graffy.builtin.router"
+name = "Prompt Router"
+version = "0.1.0"
+description = "Selects an opted-in graph for a prompt by trigger phrase, or falls back to the conversation floor."
+license = "Apache-2.0"
+authors = ["graffy built-ins"]
+tags = ["builtin", "routing"]
+
+[policy.evidence]
+mode = "strict"
+min_level = "L1"
+
+[policy.budget]
+# The phrase router consults no model; the budget still bounds the run.
+max_tokens = 2000
+max_usd = 0.05
+max_seconds = 30
+
+[policy.routing]
+# No quality gate here; "escalate" is the built-in convention.
+ladder = ["fast"]
+on_quality_fail = "escalate"
+
+[[node]]
+id = "intake"
+kind = "intake"
+description = "Records the complete user request as one Information Unit."
+
+[[node]]
+id = "route"
+kind = "router"
+description = "Chooses the graph this prompt runs on and journals the reason."
+
+[[edge]]
+from = "intake"
+to = "route"

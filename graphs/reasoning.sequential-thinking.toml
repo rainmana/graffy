@@ -12,6 +12,8 @@ description = "Structured step-by-step reasoning with a critique gate and guarde
 license = "Apache-2.0"
 authors = ["graffy built-ins"]
 tags = ["builtin", "reasoning", "clear-thought"]
+# Opt-in to prompt routing (ADR-0012): whole-phrase, case-insensitive matches.
+route_on = ["step by step", "think it through", "walk me through your reasoning"]
 
 [policy.evidence]
 mode = "strict"

@@ -40,6 +40,8 @@ pub struct Turn {
     pub approvals: Arc<dyn ApprovalHandler>,
     pub cancellation: Cancellation,
     pub event_tap: Option<EventTap>,
+    /// The routing run that selected this graph for the prompt (ADR-0012).
+    pub routed_by: Option<String>,
 }
 
 /// What a finished attempt means for the turn.
@@ -145,6 +147,7 @@ impl TurnRunner {
                     attempt_group_id: self.attempt_group.clone(),
                     attempt_index: attempt,
                     retry_of_run_id: self.prior_run_id.clone(),
+                    routed_by_run_id: self.turn.routed_by.clone(),
                     run_kind: run_kind as i32,
                     prior_boundary: self.turn.prior_boundary.clone(),
                 },

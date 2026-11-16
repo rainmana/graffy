@@ -11,6 +11,8 @@ description = "Options, criteria, weighted evaluation, and a challenged recommen
 license = "Apache-2.0"
 authors = ["graffy built-ins"]
 tags = ["builtin", "reasoning", "clear-thought", "decision"]
+# Opt-in to prompt routing (ADR-0012): whole-phrase, case-insensitive matches.
+route_on = ["pros and cons", "help me decide", "decide between", "which should i choose", "weigh my options"]
 
 [policy.evidence]
 mode = "strict"

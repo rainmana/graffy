@@ -15,5 +15,5 @@ Locked decisions, in order. An ADR is superseded only by a newer ADR that names 
 | [0009](0009-licensing-attribution.md) | GPLv3 project licensing and third-party inflow rules | Superseded by 0013 |
 | [0010](0010-chat-through-graphs.md) | Chat over graph execution in Ratatui/CLI; optional reasoning view; desktop/web tabled indefinitely | Accepted direction; implementation proposed |
 | [0011](0011-release-and-boundary-receipts.md) | Successful-run release, output receipts, exact-payload approvals, cancellation and calibration boundary | Accepted |
-| [0012](0012-prompt-to-graph-routing.md) | Prompt-to-graph routing: router as its own run, opt-in trigger phrases, optional decision-model router (Jev / Strands Decider) | Accepted direction; implementation not started |
+| [0012](0012-prompt-to-graph-routing.md) | Prompt-to-graph routing: router as its own run, opt-in trigger phrases, optional decision-model router (Jev / Strands Decider) | Accepted; deterministic router implemented |
 | [0013](0013-apache-2-relicensing.md) | Relicense graffy to Apache-2.0; permissive-only inflow rules | Accepted |

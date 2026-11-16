@@ -201,7 +201,8 @@ impl RunMetrics {
                 Event::Budget(_)
                 | Event::McwSnapshot(_)
                 | Event::BoundaryEvent(_)
-                | Event::Segmentation(_) => {}
+                | Event::Segmentation(_)
+                | Event::GraphRouting(_) => {}
             }
         }
         m.max_node_visits = visits.values().copied().max().unwrap_or(0);
@@ -229,6 +230,12 @@ pub fn is_rating_observation(r: &RunMetrics) -> bool {
     r.run_kind == wire::RunKind::RatingObservation as i32 || r.graph_id == "graffy.mcw.rating"
 }
 
+/// Is this row a routing run (ADR-0012)? It selects a graph for a prompt and
+/// is never an execution attempt, exchange or session turn.
+pub fn is_routing_run(r: &RunMetrics) -> bool {
+    r.run_kind == wire::RunKind::Routing as i32
+}
+
 /// Convergence view per EXTERNAL ATTEMPT GROUP (P0.1): one prompt→response
 /// attempt group and its automatic retries. Convergence is computed here,
 /// never per whole session — a session of five clean exchanges is five
@@ -251,7 +258,7 @@ pub fn attempt_groups_from_rows(rows: &[RunMetrics]) -> Vec<AttemptGroupMetrics>
     let mut order: Vec<String> = Vec::new();
     let mut map: BTreeMap<String, AttemptGroupMetrics> = BTreeMap::new();
     for r in rows {
-        if is_rating_observation(r) {
+        if is_rating_observation(r) || is_routing_run(r) {
             continue;
         }
         let gid = if r.attempt_group_id.is_empty() {
@@ -289,7 +296,7 @@ pub fn sessions_from_rows(rows: &[RunMetrics]) -> Vec<SessionMetrics> {
     let mut order: Vec<String> = Vec::new();
     let mut map: BTreeMap<String, SessionMetrics> = BTreeMap::new();
     for r in rows {
-        if r.session_id.is_empty() || is_rating_observation(r) {
+        if r.session_id.is_empty() || is_rating_observation(r) || is_routing_run(r) {
             continue;
         }
         let entry = map.entry(r.session_id.clone()).or_insert_with(|| {
@@ -393,6 +400,8 @@ pub struct AggregateMetrics {
     /// HRDM rating observation journals seen (counted separately; they
     /// contribute samples and NOTHING else).
     pub rating_observations: u64,
+    /// Routing runs (ADR-0012) — counted here and in no execution aggregate.
+    pub routing_runs: u64,
     pub repairs_run_passed: u64,
     /// Run-passed / all repairs (`null` when none ran). NOT causal efficacy.
     pub repair_run_passed_rate: Option<f64>,
@@ -407,8 +416,12 @@ impl AggregateMetrics {
         let mut a = AggregateMetrics::default();
         // P0.1: rating observations are ABOUT sessions — they contribute
         // their HRDM samples and nothing else to any aggregate.
-        let exec_rows: Vec<&RunMetrics> =
-            rows.iter().filter(|r| !is_rating_observation(r)).collect();
+        // Routing runs likewise: counted once as routing, never as execution.
+        let exec_rows: Vec<&RunMetrics> = rows
+            .iter()
+            .filter(|r| !is_rating_observation(r) && !is_routing_run(r))
+            .collect();
+        a.routing_runs = rows.iter().filter(|r| is_routing_run(r)).count() as u64;
         for r in rows.iter().filter(|r| is_rating_observation(r)) {
             a.rating_observations += 1;
             a.hrdm_samples += r.hrdm_samples;
@@ -694,6 +707,33 @@ mod tests {
             none.legacy_mode_nonrecurrence_rate, None,
             "unassessed → null, never 0"
         );
+    }
+
+    #[test]
+    fn routing_runs_are_counted_once_and_never_as_execution() {
+        // ADR-0012: a routing run is about a prompt. It must not add a run,
+        // an attempt group, or a session turn to any execution view.
+        let turn = RunMetrics {
+            session_id: "s1".into(),
+            attempt_group_id: "g1".into(),
+            status: "succeeded".into(),
+            ..Default::default()
+        };
+        let routing = RunMetrics {
+            session_id: "s1".into(),
+            attempt_group_id: "g-router".into(),
+            run_kind: wire::RunKind::Routing as i32,
+            status: "succeeded".into(),
+            ..Default::default()
+        };
+        let rows = vec![routing, turn.clone()];
+        let with = AggregateMetrics::from_rows(&rows);
+        let without = AggregateMetrics::from_rows(&[turn]);
+        assert_eq!(with.runs, without.runs);
+        assert_eq!(with.runs_by_status, without.runs_by_status);
+        assert_eq!((with.routing_runs, without.routing_runs), (1, 0));
+        assert_eq!(attempt_groups_from_rows(&rows).len(), 1);
+        assert_eq!(sessions_from_rows(&rows)[0].runs, 1);
     }
 
     #[test]

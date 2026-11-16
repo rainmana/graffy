@@ -139,6 +139,8 @@ fn conversation_floor(
             version: "0.1.0".into(),
             description,
             license: Some("Apache-2.0".into()),
+            // Generated graphs are explicit-only until their author opts in.
+            route_on: Vec::new(),
             authors: vec![format!("graphified by graffy ({mode_label})")],
             tags,
         },

@@ -1,14 +1,20 @@
 # ADR-0012: Prompt-to-graph routing
 
-- Status: **Accepted direction; implementation not started**
+- Status: **Accepted; deterministic router implemented (2026-11-16); decision-model router not started**
 - Date: 2026-11-15
 - Decider: W. Alec Akin (@rainmana)
 - Related: ADR-0010 ("Later routing"), GitHub issue #17
 
-Nothing in this ADR is shipped. It records decisions the owner made on
-2026-11-15 so they do not evaporate, plus verified facts about two external
-models he proposed. Work starts after he has tried `graffy chat --tui` and
-PR #20 is merged; routing goes in its own PR.
+It records decisions the owner made on 2026-11-15, plus verified facts about
+two external models he proposed.
+
+**Implemented:** the deterministic router, behind `graffy chat --route` —
+`route_on` in the graph spec, `graffy_core::route`, the built-in
+`graffy.builtin.router` graph, run kind `ROUTING`, the `graph_routing` event,
+`routed_by_run_id` on the target run's manifest, and the `/chat` override.
+Routing is opt-in per chat for now rather than the default, so existing
+behaviour does not change until it has been used for real.
+**Not implemented:** the decision-model router, graphify-on-the-fly.
 
 ## Decisions (owner)
 

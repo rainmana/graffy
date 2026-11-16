@@ -48,6 +48,17 @@ impl CompiledGraph {
                 spec.policy.evidence.min_level
             )));
         }
+        if let Some(blank) = spec
+            .graph
+            .route_on
+            .iter()
+            .find(|phrase| crate::route::normalize(phrase).is_empty())
+        {
+            // A phrase with no words would match every prompt.
+            return Err(CompileError::Invalid(format!(
+                "route_on phrase '{blank}' contains no letters or digits"
+            )));
+        }
         if !matches!(spec.policy.evidence.mode.as_str(), "strict" | "trace-only") {
             return Err(CompileError::Invalid(
                 "evidence mode must be strict or trace-only".into(),

@@ -60,6 +60,9 @@ enum RunKind {
   RUN_KIND_EXTERNAL_FOLLOWUP = 3;
   // An HRDM rating observation ABOUT a session — never an execution run.
   RUN_KIND_RATING_OBSERVATION = 4;
+  // A routing run: selects which graph an external prompt runs on (ADR-0012).
+  // It is ABOUT a prompt — never a conversation turn, exchange or attempt.
+  RUN_KIND_ROUTING = 5;
 }
 
 // First frame of every journal: what ran, from which spec, under which policy.
@@ -87,6 +90,8 @@ message RunManifest {
   // The prior attempt's run id when this run is an automatic retry.
   string retry_of_run_id = 13;
   RunKind run_kind = 14;
+  // The routing run that selected this graph for the prompt, when one did.
+  string routed_by_run_id = 15;
 }
 
 message NodeTransition {
@@ -158,6 +163,27 @@ message RoutingDecision {
   uint32 escalation_level = 5;
   string reason = 6;            // "policy" | "quality-gate-escalation" | ...
   repeated string considered = 7;
+}
+
+// Which graph a routing run selected for an external prompt (ADR-0012).
+// The record states how the choice was made; it is not evidence that the
+// chosen graph was the right one.
+message GraphRoutingDecision {
+  string node_id = 1;
+  // How the choice was made. "phrases" = deterministic trigger-phrase match.
+  string router = 2;
+  string chosen_graph_id = 3;
+  string chosen_graph_name = 4;
+  // True when no single eligible graph matched and the floor graph runs.
+  bool fallback = 5;
+  // Plain-language reason, shown to the human as recorded.
+  string reason = 6;
+  // The trigger phrase that matched, when one graph was selected.
+  string matched_phrase = 7;
+  // Every opted-in graph id that was eligible, in catalog order.
+  repeated string considered = 8;
+  // Graph ids whose phrases matched (more than one means ambiguous).
+  repeated string matched = 9;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,5 +282,8 @@ message RunEvent {
     // P0.2 audit records.
     BoundaryEventRecord boundary_event = 26;
     SegmentationRecord segmentation = 27;
+
+    // ADR-0012 prompt-to-graph routing.
+    GraphRoutingDecision graph_routing = 28;
   }
 }

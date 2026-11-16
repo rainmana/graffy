@@ -143,7 +143,13 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
   plain-terminal loop, and `graffy chat --tui` is the Ratatui conversation view.
   The view records an output receipt only after drawing the answer, and chat
   approvals need Ctrl chords (typing must never decide a gate) — keep both.
-  Next: prompt-to-graph routing (issue #17). The TUI chat has been exercised in a
+  Routing (ADR-0012): `chat --route` runs `graffy.builtin.router` as its own
+  run (kind ROUTING — never a turn; keep it out of every history, exchange and
+  execution-metric path, like rating runs). Graphs opt in with `route_on`;
+  absent means explicit-only. The `router` node is registered by the frontend
+  with the catalog, not in the default registry. Next: the decision-model
+  router (Jev / Strands Decider) behind a seam — no hardcoded model or
+  endpoint, and no invented confidence threshold. The TUI chat has been exercised in a
   pseudo-terminal and by render tests, not yet by a human on real terminals.
   Desktop/web is tabled indefinitely. The optional graph inspection view is not
   a prerequisite for chat.
@@ -161,6 +167,7 @@ cargo test --workspace                       # offline suite; live MCP test is e
 cargo run -- run graffy.builtin.conversation --prompt "hi" --offline --tui
 cargo run -- chat --offline                  # terminal chat; every line is a graph turn (src/turn.rs)
 cargo run -- chat --offline --tui            # Ratatui conversation view (crates/graffy-tui/src/ui/chat.rs)
+cargo run -- chat --offline --route          # route messages onto opted-in graphs (crates/graffy-core/src/route.rs)
 cargo run -- run <graph> --prompt "..." --retry auto   # C2 repair-feedback retries
 cargo run -- rate <session-id> [--blinded]   # boundary-transcript HRDM rating (calibration)
 cargo run -- run <graph> --prompt "..." --session <id>  # continue a session (adds an exchange)

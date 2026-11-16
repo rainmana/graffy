@@ -236,3 +236,60 @@ fn resume_stays_on_the_sessions_graph() {
     assert!(pinned.status.success(), "{}", err(&pinned));
     assert!(err(&pinned).contains("because --graph pins it"));
 }
+
+#[test]
+fn routed_chat_runs_the_router_as_its_own_journaled_run() {
+    let h = Sandbox::new();
+    let o = h.chat(
+        &["--route"],
+        "hello\nwhat are the pros and cons of renting?\nhelp me decide, step by step\n/chat pros and cons, but just chat\n",
+    );
+    assert!(o.status.success(), "{}\n{}", out(&o), err(&o));
+    let runs = h.runs();
+    let (routing, turns): (Vec<_>, Vec<_>) = runs
+        .iter()
+        .partition(|(m, _)| m.run_kind == wire::RunKind::Routing as i32);
+    // Four messages are four exchanges; three were routed, `/chat` skipped it.
+    assert_eq!((routing.len(), turns.len()), (3, 4));
+    let decision = |events: &[wire::RunEvent]| graffy_core::route::decision_from(events).unwrap();
+
+    // 1. No phrase: the conversation floor, and the reason is said plainly.
+    assert!(decision(&routing[0].1).fallback);
+    // 2. One graph's phrase: that graph runs, linked to the routing run.
+    let chosen = decision(&routing[1].1);
+    assert_eq!(
+        chosen.chosen_graph_id,
+        "graffy.builtin.reasoning.decision-framework"
+    );
+    let routed_turn = turns
+        .iter()
+        .find(|(m, _)| m.routed_by_run_id == routing[1].0.run_id)
+        .expect("the target run names its routing run");
+    assert_eq!(routed_turn.0.graph_id, chosen.chosen_graph_id);
+    assert!(out(&o).contains(
+        "routing : running 'Decision Framework' because your message says \"pros and cons\""
+    ));
+    // 3. Two graphs' phrases: ambiguous, so nothing is guessed.
+    let ambiguous = decision(&routing[2].1);
+    assert!(ambiguous.fallback && ambiguous.matched.len() == 2);
+    // 4. `/chat` is the human override: no routing run, plain conversation.
+    let plain = turns.last().unwrap();
+    assert!(plain.0.routed_by_run_id.is_empty());
+    assert_eq!(plain.0.graph_id, "graffy.builtin.conversation");
+
+    // Routing runs are not conversation turns: resuming shows four human
+    // messages, not seven, and one session holds all four exchanges.
+    let session = out(&o)
+        .lines()
+        .find_map(|l| l.strip_prefix("resume this chat: graffy chat --session "))
+        .unwrap()
+        .to_owned();
+    assert!(session.ends_with(" --route"), "{session}");
+    let id = session.trim_end_matches(" --route");
+    let resumed = h.chat(&["--session", id, "--route"], "");
+    assert_eq!(out(&resumed).matches("human> ").count(), 4);
+
+    // A pin and the router cannot both choose the graph.
+    let both = h.chat(&["--route", "--graph", "graffy.builtin.conversation"], "");
+    assert!(!both.status.success());
+}

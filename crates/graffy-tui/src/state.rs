@@ -364,6 +364,9 @@ impl AppState {
                 self.feed(seq, "MCW state snapshot captured".to_owned());
             }
             Some(Event::BoundaryEvent(_)) | Some(Event::Segmentation(_)) => {}
+            Some(Event::GraphRouting(d)) => {
+                self.feed(frame.seq, format!("routing: {}", d.reason));
+            }
             None => {}
         }
     }
