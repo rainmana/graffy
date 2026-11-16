@@ -8,7 +8,7 @@ id = "graffy.builtin.reasoning.decision-framework"
 name = "Decision Framework"
 version = "0.1.0"
 description = "Options, criteria, weighted evaluation, and a challenged recommendation."
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
 authors = ["graffy built-ins"]
 tags = ["builtin", "reasoning", "clear-thought", "decision"]
 

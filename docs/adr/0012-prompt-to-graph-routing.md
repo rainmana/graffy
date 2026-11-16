@@ -55,7 +55,7 @@ Verified on 2026-11-15, not from memory:
   bundled server exposes the same `POST /v1/systemone` shape (`state`,
   `questions`, answers with `choice`/`noul`/`score`). It is a Python package
   the user installs and runs; graffy would talk to it over HTTP and bundle
-  nothing, so there is no license inflow (ADR-0009).
+  nothing, so there is no license inflow (ADR-0013).
 
 Because both speak the same wire shape, one adapter with a configurable base
 URL can serve either. Design constraints:

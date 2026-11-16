@@ -119,8 +119,10 @@ Goal: a stranger can watch a prompt refuse to run raw.
   after corrections, all of which map onto graffy's journal and MCW boundary
   records; and "flair" drawn from the Ratatui showcase projects (a cyberpunk
   aura). Breadcrumbs: friendo is the owner's own code and he has offered it, but
-  it is licensed GPL-3.0-only — record any inflow in `NOTICE.md` and reconcile it
-  with graffy's license first. Keep the accessibility rules (glyph AND word,
+  it is licensed GPL-3.0-only while graffy is Apache-2.0 (ADR-0013). GPL code
+  cannot be copied into graffy as is: the owner must first release the borrowed
+  parts under Apache-2.0, and the inflow is then recorded in `NOTICE.md`. Ideas
+  and designs carry no such restriction. Keep the accessibility rules (glyph AND word,
   minimal motion, plain-terminal parity) when adding motion or color.
 - **Theme engine**: first-class TUI themes — Catppuccin, Dracula, and Nord out of the box,
   plus user-defined theme files (a `themes/*.toml` format in the same durable spirit as graph

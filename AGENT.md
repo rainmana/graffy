@@ -7,7 +7,7 @@ paid for. Read it before changing anything. `CLAUDE.md` points here.
 
 ## What graffy is
 
-A terminal-native agentic harness (Rust, GPL-3.0-or-later) with one
+A terminal-native agentic harness (Rust, Apache-2.0) with one
 non-negotiable invariant: **nothing executes as a raw prompt or skill.**
 Every prompt, imported skill, MCP tool call, compaction step, and chat turn
 is compiled into a typed, budgeted, journaled **graph** that persists as a
@@ -90,7 +90,7 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
    forbidden. When something can't be done, say so loudly (see
    `ToolError::Unavailable`, the collaborative non-TTY bail).
 4. **Decisions live in ADRs** (`docs/adr/`), inflows in `NOTICE.md`
-   (GPLv3-compatible only), deferred ideas in ROADMAP "Tabled" (they must
+   (Apache-2.0-compatible only; no copyleft code, ADR-0013), deferred ideas in ROADMAP "Tabled" (they must
    not evaporate — write them down with design breadcrumbs), field
    observations in `docs/KNOWN-ISSUES.md`.
 5. **Generated things must be lawful**: specs produced by graphify or facade

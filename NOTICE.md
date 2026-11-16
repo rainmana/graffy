@@ -1,8 +1,12 @@
 # NOTICE — third-party attributions
 
-graffy is licensed **GPL-3.0-or-later** (see [LICENSE](LICENSE)). The following projects flow
-into graffy as dependencies, ported concepts, or design references. All inbound licenses are
-GPLv3-compatible (verified 2026-08-29 via crates.io / GitHub license metadata).
+graffy is licensed **Apache-2.0** (see [LICENSE](LICENSE); relicensed from GPL-3.0-or-later on
+2026-11-14, [ADR-0013](docs/adr/0013-apache-2-relicensing.md)). The following projects flow
+into graffy as dependencies, ported concepts, or design references. The sources below are
+Apache-2.0 or MIT (verified 2026-08-29 via crates.io / GitHub license metadata). The full
+dependency tree was re-checked on 2026-11-16 from `cargo metadata`: 445 third-party packages,
+none GPL/AGPL-only; one, `option-ext`, is MPL-2.0 (file-level copyleft, used unmodified as a
+dependency); every other package offers a permissive license.
 
 | Source | License | What graffy takes |
 | --- | --- | --- |

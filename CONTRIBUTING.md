@@ -21,5 +21,6 @@ Pre-alpha — expect churn. That said:
 
 ## License
 
-By contributing you agree your work is licensed GPL-3.0-or-later. Third-party inflows must be
-GPLv3-compatible and recorded in `NOTICE.md`.
+By contributing you agree your work is licensed Apache-2.0. Third-party inflows must be
+compatible with Apache-2.0 (no GPL/AGPL/LGPL-only code) and recorded in `NOTICE.md`; see
+[ADR-0013](docs/adr/0013-apache-2-relicensing.md).

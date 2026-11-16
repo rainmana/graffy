@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **License: Apache-2.0** (owner decision, 2026-11-14; ADR-0013). graffy moves from
+  GPL-3.0-or-later to Apache-2.0 from this point on. Releases up to v0.1.0-alpha.6 remain
+  available under the GPL terms they shipped with. Package metadata, built-in graphs,
+  schema headers, contribution terms and the inflow rule now say Apache-2.0; graphs that
+  graffy generates (graphify, MCP facades) are stamped Apache-2.0 instead of GPL.
 - **Shared turn runner (ADR-0010 step 1):** `src/turn.rs` owns attempt identity,
   whole-turn budgets and retry verdicts. `graffy run` and `graffy run --tui` both
   drive it; `graffy_tui::run_live` no longer builds its own executor. No behavior

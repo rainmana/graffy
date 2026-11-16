@@ -1,6 +1,7 @@
 # ADR-0009: GPLv3 licensing and third-party inflow rules
 
-- Status: **Accepted**
+- Status: **Superseded by [ADR-0013](0013-apache-2-relicensing.md)** (2026-11-14). Kept as the
+  record of the original GPLv3 decision; its inflow-recording rule (`NOTICE.md`) carries over.
 - Date: 2026-08-29
 - Deciders: W. Alec Akin (@rainmana)
 

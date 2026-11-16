@@ -9,7 +9,7 @@ id = "graffy.builtin.conversation.gated"
 name = "Gated Conversation"
 version = "0.1.0"
 description = "Conversation floor with a human approval gate before the response is released."
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
 authors = ["graffy built-ins"]
 tags = ["builtin", "conversation", "approval"]
 
