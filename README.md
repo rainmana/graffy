@@ -1,17 +1,51 @@
 <div align="center">
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/graffy-logo-dark.svg">
+  <img src="assets/graffy-logo-light.svg" alt="graffy" width="420">
+</picture>
+
 # graffy
 
 **A terminal-native runtime for inspectable, durable agent graphs.**
 
-Every prompt, imported skill, tool call, and approval runs through a compiled TOML graph and produces an append-only run journal.
+Every prompt, chat message, imported skill, tool call, and approval runs through a compiled TOML graph and produces an append-only run journal.
 
 [![CI](https://github.com/rainmana/graffy/actions/workflows/ci.yml/badge.svg)](https://github.com/rainmana/graffy/actions/workflows/ci.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/rainmana/graffy?include_prereleases&sort=semver&label=release)](https://github.com/rainmana/graffy/releases)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
+[![Rust: stable, 2024 edition](https://img.shields.io/badge/rust-stable_%C2%B7_2024_edition-orange?logo=rust)](rust-toolchain.toml)
+[![Platforms: Linux and macOS](https://img.shields.io/badge/platforms-linux_%C2%B7_macOS-informational)](#install-a-release-binary)
+[![TUI: Ratatui](https://img.shields.io/badge/TUI-ratatui-8A2BE2)](https://ratatui.rs)
+[![MCW Framework](https://img.shields.io/badge/built_on-MCW_Framework-0891b2)](https://github.com/rainmana/mcw-framework)
 
-*Pre-alpha (source-tree version `0.1.0-alpha.6`; tagged releases may trail it). The graph runtime, journals, TUI, providers, MCP facades, graphification, persistence, retries, and metrics work; several larger MCW, memory, agent, and evaluation features remain in development.*
+*Pre-alpha (source-tree version `0.1.0-alpha.7`; tagged releases may trail it). The graph runtime, journals, terminal chat, prompt routing, TUI, providers, MCP facades, graphification, persistence, retries, and metrics work; several larger MCW, memory, agent, and evaluation features remain in development.*
 
 </div>
+
+## At a glance
+
+```console
+$ graffy chat --offline --route
+routing : on — may choose 'Decision Framework', 'Sequential Thinking'. Start a message with /chat to use plain conversation instead.
+
+you> what are the pros and cons of renting?
+routing : running 'Decision Framework' because your message says "pros and cons"
+  · step: intake
+  · step: ground
+  · step: frame
+  · step: evaluate
+  · step: challenge
+  · step: decide
+  · step: respond
+
+================ response (not model-reviewed) ================
+[offline echo — no real model was consulted]
+what are the pros and cons of renting?
+details : graffy replay "~/.graffy/runs/<run-id>.journal" --tui
+```
+
+That is a plain-terminal chat turn (start-up lines trimmed, journal path shortened). The message was routed onto a registered graph by a rule you can read, the graph ran step by step, and the answer was released with an honest label. `--offline` swaps the model for a deterministic echo, so this works with no keys and no network. Add `--tui` for the full-screen conversation view.
 
 ## Why graffy?
 
@@ -23,6 +57,8 @@ Most agent harnesses treat the prompt as the program and leave orchestration hid
 - **Quality gates route visibly.** `verify` nodes return `PASS` or `REVISE`; revisions emit failure signals and move subsequent work up the graph's routing ladder.
 - **Tools are graph nodes.** MCP tools are discovered over stdio and wrapped in generated facade graphs. Destructive or unannotated tools receive a human approval gate by default.
 - **Human decisions are journaled.** Approvals show exact payloads and preserve decision input. Reject and resubmit a correction to change a payload. EOF and abandoned approvals release nothing and do not invent a human decision.
+- **Chat is graph execution.** `graffy chat` is a conversation in the plain terminal or a Ratatui view. Every message is one external turn through a compiled graph; one session carries the history; an answer appears only after the graph's release decision, with a delivery receipt.
+- **Routing is explicit and journaled.** With `--route`, each message can run on a graph that opted in. The router is itself a graph run that records why it chose, and you can override it per message.
 - **MCW concepts are typed.** Information Units, evidence artifacts, the six coordination failure modes, five repair operations, and H/R/D/M samples are represented in the protobuf schema. The current runtime records IUs and evidence, detects judge-labelled failures and visit-cap exhaustion, and journals internal retry repair attempts, separately from human repair episodes.
 
 ## Quick start
@@ -73,6 +109,73 @@ $ graffy replay ~/.graffy/runs/<run-id>.journal --tui
 ```
 
 Running `graffy` with no command opens the journal-browser TUI. `graffy tui` does the same explicitly.
+
+## Chat
+
+```console
+$ graffy chat --offline            # plain terminal, line by line
+$ graffy chat --offline --tui      # full-screen conversation view
+```
+
+Drop `--offline` once [model tiers are bound](#live-model-configuration). Each message runs the built-in conversation graph (`--graph <ID|PATH>` pins another), as its own journaled run inside one session.
+
+- **Follow-ups carry history.** Later messages receive the earlier visible exchanges. `graffy chat --session <ID>` resumes a conversation: it reprints the recorded transcript and re-executes nothing. Resuming without `--graph` stays on the session's own graph.
+- **Answers appear only after release.** A turn that fails says that no answer was released, and the chat carries on. Plain chat then exits nonzero when it ends.
+- **`--retry <N|auto>`** allows automatic extra attempts per turn, inside that turn's shared budget.
+- **Piped input works** in plain chat: each line is a message, and end-of-input leaves. Piped lines are never read as approvals — with non-terminal input an approval gate is abandoned and nothing is released. `--tui` needs a real terminal.
+
+Inside a chat:
+
+| Input | Effect |
+| --- | --- |
+| `/correct <text>` | Sends a declared human correction (needs an earlier turn) |
+| `/chat <text>` | Sends one message as plain conversation, skipping routing |
+| `/new` | TUI only: starts a fresh conversation |
+| `/quit` or end-of-input | Leaves |
+| `Ctrl-C` | Stops the running turn; when idle, leaves |
+
+Step progress is written to stderr in plain chat, so stdout holds only the conversation.
+
+### Routing messages onto graphs
+
+```console
+$ graffy chat --route              # deterministic trigger phrases
+$ graffy chat --route=decider      # a decision model chooses
+$ graffy chat --tui --route        # either mode works in the TUI
+```
+
+A graph is eligible only if its spec opts in:
+
+```toml
+[graph]
+id = "example.decide"
+name = "Decide"
+version = "0.1.0"
+route_on = ["pros and cons", "help me decide"]
+route_when = "The person wants help choosing between options."
+```
+
+Graphs without `route_on` — including everything graffy generates — are never selected automatically. Of the built-ins, Decision Framework and Sequential Thinking opt in. `--route` cannot be combined with `--graph`.
+
+**`--route` (phrases).** A graph matches when the message contains one of its `route_on` phrases as whole words, ignoring case. Exactly one matching graph is selected. No match, or matches on more than one graph, runs plain conversation. There is no score and no threshold.
+
+**`--route=decider` (decision model).** A small decision model is asked which opted-in graph fits, using each graph's `route_when` sentence (or its description). The adapter speaks the `POST /v1/systemone` shape used by TypeSafe's hosted Jev and by a self-hosted [Strands Decider](https://github.com/strands-labs/strands-decider) server. Nothing is defaulted:
+
+| Variable | Meaning |
+| --- | --- |
+| `GRAFFY_DECIDER_URL` | Required. Service root, e.g. `https://api.typesafe.ai` or `http://127.0.0.1:8000` |
+| `GRAFFY_ROUTER_MIN_CONFIDENCE` | Required. A number from 0 to 1; a pick the model reports below it is not followed |
+| `GRAFFY_DECIDER_MODEL` | Optional. A model name the service accepts |
+| `GRAFFY_DECIDER_API_KEY` | Optional. Sent as a Bearer token |
+
+- **Your messages are sent to that endpoint.** The chat says which one before anything is sent. `/chat <text>` keeps a message out of routing.
+- The confidence is the model's own report, journaled as such with the answering model, the endpoint, and your threshold. It is not a graffy measurement, and a routing choice is not evidence the graph was right.
+- An unreachable decider, or an unusable answer, fails the turn. It never falls back to phrases.
+- Plain `http://` is accepted only for `localhost`, `127.0.0.1`, and `[::1]`.
+
+Hosted Jev has been exercised end to end. A local Strands Decider server has not yet been run against the adapter; only its published schema was checked.
+
+Either way, the router is its own journaled run of `graffy.builtin.router`. It is never a conversation turn: it is excluded from session history and exchange counts, and `graffy metrics` reports it separately.
 
 ## Live model configuration
 
@@ -131,6 +234,7 @@ Built-ins are ordinary TOML specs. They are automatically seeded into the regist
 | `graffy.builtin.conversation.gated` | conversation floor → human approval → respond | Shows the exact reviewed draft and requires human approval before release |
 | `graffy.builtin.reasoning.sequential-thinking` | plan → think → critique → synthesize | Structured reasoning with a guarded critique loop |
 | `graffy.builtin.reasoning.decision-framework` | frame → evaluate → challenge → decide | Options, criteria, weighted evaluation, challenge, and recommendation |
+| `graffy.builtin.router` | intake → route | Chooses which opted-in graph a chat message runs on (see [routing](#routing-messages-onto-graphs)); run by `graffy chat --route`, not directly |
 
 Run a built-in by registry ID or run a TOML file directly:
 
@@ -149,6 +253,7 @@ Global option: `-v` enables debug logs and `-vv` enables trace logs. `RUST_LOG` 
 | `graffy init` | Creates the graffy home, run directory, database, and built-in graph records | — |
 | `graffy doctor` | Shows version, data paths, store counts, tier bindings, and credential presence | — |
 | `graffy run <SPEC> --prompt <TEXT>` | Runs a TOML path or registered graph ID | `--offline`, `--tui`, `--journal <PATH>`, `--retry <N|auto>`, `--session <ID>`, `--correction` |
+| `graffy chat` | Conversation where every message runs as a graph turn | `--tui`, `--route[=phrases|decider]`, `--graph <ID|PATH>`, `--session <ID>`, `--retry <N|auto>`, `--offline` |
 | `graffy replay <JOURNAL>` | Folds a journal into a run summary | `--events`, `--tui` |
 | `graffy runs` | Lists indexed runs | `--limit <N>`; default `10` |
 | `graffy metrics` | Folds journals into per-run and aggregate MCW/runtime metrics | `--dir <PATH>`, `--json` |
@@ -175,8 +280,8 @@ Retries share one whole-turn token/time/recorded-cost budget. Deadline expiry
 interrupts waiting models, tools, and approvals. Cancelling local work cannot undo
 an external effect or guarantee a provider stopped. Failed runs return nonzero.
 
-Retries and session continuation are currently unavailable with `--tui`. Run in
-plain mode, then replay any attempt in the TUI.
+`graffy run --tui` shows a single run: retries and session continuation need
+plain `graffy run`, or [`graffy chat --tui`](#chat) for an interactive session.
 
 ### Session continuation and calibration
 
@@ -189,7 +294,7 @@ $ graffy rate <session-id> --rater <name> --segmentation correction.json
 
 Continuation uses confirmed delivered history, including indexed custom journals.
 Unknown sessions and incomplete/corrupt history fail explicitly. `--correction`
-requires an existing session. Chat composition itself is still future work.
+requires an existing session. For an interactive conversation use [`graffy chat`](#chat).
 
 Ratings use pinned anchors and complete five-exchange windows, not five runs.
 They remain **draft calibration data**. A reviewed segmentation file can correct
@@ -206,7 +311,7 @@ $ graffy metrics --json > metrics.json
 $ graffy metrics --dir /path/to/journals
 ```
 
-The metrics fold reports recorded run outcomes, tokens, model/tool calls, IUs, evidence levels, failure modes, repairs, visit-cap hits, escalation outcomes, and H/R/D/M sample counts. It does not estimate missing values.
+The metrics fold reports recorded run outcomes, tokens, model/tool calls, IUs, evidence levels, failure modes, repairs, visit-cap hits, escalation outcomes, and H/R/D/M sample counts. Routing runs and the tokens a decision-model router reported are counted separately, never as execution runs. It does not estimate missing values.
 
 ## Graphify skills and prompts
 
@@ -278,6 +383,19 @@ When the server provides no prompt-based usage knowledge and registration is int
 Only complete MCP tool responses containing text or structured JSON are handled today. Streamable HTTP transport, elicitation/input-required responses, and MCP tasks are not yet implemented.
 
 ## TUI controls
+
+### Chat view (`graffy chat --tui`)
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Send the message. While a turn is running, the draft is kept instead of sent |
+| Mouse wheel, `↑` / `↓` | Scroll the transcript |
+| `Ctrl-U` / `Ctrl-D`, `PageUp` / `PageDown` | Scroll half a page |
+| `Tab` | Open read-only run details for the latest run (`q` returns) |
+| `Ctrl-A` / `Ctrl-R` | Approve / reject when an approval is showing |
+| `Ctrl-C` | Stop the running turn; when idle, quit |
+
+Approvals in chat take Ctrl chords on purpose: text typed as a prompt appears can never decide a gate. The delivery receipt is recorded only after the frame showing the answer has been drawn. Recorded text is stripped of control characters before it is rendered. Mouse capture provides wheel scrolling; selecting text then needs your terminal's modifier key (Option on macOS terminals, Shift on most others). The message box is append-only for now: type, Backspace, and paste, with no cursor movement inside the draft.
 
 ### Run and replay views
 
@@ -351,9 +469,9 @@ from = "intake"
 to = "draft"
 ```
 
-Implemented node kinds are `intake`, `research`, `model`, `verify`, `respond`, `approval`, and `tool.invoke`. Unknown kinds fail loudly at runtime. Back-edges must be guarded; guards currently support truthy facts, `==`, `!=`, and `&&`.
+Implemented node kinds are `intake`, `research`, `model`, `verify`, `respond`, `approval`, and `tool.invoke`. A `router` kind exists for the built-in router graph; it is supplied by `graffy chat --route` together with the catalog of opted-in graphs, and is not available to graphs run any other way. Unknown kinds fail loudly at runtime. Back-edges must be guarded; guards currently support truthy facts, `==`, `!=`, and `&&`.
 
-Normal executor runs can journal the graph ID/version, graffy version, graph-spec SHA-256, session ID, evidence policy, node transitions, IUs, evidence, model and tool calls, routing decisions, approvals, budget events, failure signals, repair actions, and final status. The journal stores the spec hash rather than the full spec, and model requests and tool arguments are hash-represented rather than preserved as plaintext. Failed or truncated execution can leave a partial journal.
+Normal executor runs can journal the graph ID/version, graffy version, graph-spec SHA-256, session ID, evidence policy, node transitions, IUs, evidence, model and tool calls, routing decisions, approvals, budget events, failure signals, repair actions, routing decisions about which graph a message ran on, and final status. The journal stores the spec hash rather than the full spec, and model requests and tool arguments are hash-represented rather than preserved as plaintext. Failed or truncated execution can leave a partial journal.
 
 ## Current boundaries
 
@@ -367,6 +485,8 @@ The project is intentionally pre-alpha. The main implementation boundaries are:
 - The database is a graph/run/journal/MCP registry today. Episodic FTS memory, vector retrieval, temporal knowledge graphs, and layered recall are not implemented yet.
 - Multi-persona `agent.conversation` execution and benchmark/evaluation runners are scaffolded, not active node kinds.
 - Token counts are accounted after calls; a remaining output-token request is not a hard bound on total input plus output. USD accounting remains unavailable until pricing is configured.
+- Prompt routing is opt-in per chat (`--route`) and only for `graffy chat`; `graffy run` always runs the graph you name. Building a graph on the fly when none fits, and embedding-based matching, are not implemented.
+- The chat TUI is deliberately plain: an append-only message box, no click-to-select, and with `--retry` its run details show only the latest attempt. It has been used on macOS; Windows Terminal and WSL are unchecked.
 - MCP is stdio-only, and its stored argument tail is space-separated; complex shell quoting is not preserved as a shell would preserve it.
 - Existing `--journal` paths are rejected. Legacy responses without delivery receipts remain inspectable but are excluded from confirmed conversation history.
 - The TUI may show overlapping text under some Windows Terminal/WSL resize and glyph-width combinations; see [Known Issues](docs/KNOWN-ISSUES.md).
@@ -398,6 +518,7 @@ Project guidance:
 - [Known issues](docs/KNOWN-ISSUES.md) — observed field issues
 - [Contributing](CONTRIBUTING.md) — contribution requirements
 - [Changelog](CHANGELOG.md) — release history
+- Logo: `assets/graffy-logo-*.svg`, original to this project and covered by its license
 - [NOTICE](NOTICE.md) — third-party lineage and attribution
 
 ## License

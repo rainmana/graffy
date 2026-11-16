@@ -120,7 +120,7 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
   mandatory. Apple signing/notarization is tabled (he has a paid Apple
   Developer membership) — see ROADMAP.
 
-## Where the project is (alpha.6, 2026-10-17)
+## Where the project is (alpha.7, 2026-11-16)
 
 - Runtime, journals, provider adapters, MCP facades, graphification, store and
   Ratatui inspection work. The graph loop is serial; general branch/join scheduling
