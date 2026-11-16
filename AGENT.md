@@ -7,7 +7,7 @@ paid for. Read it before changing anything. `CLAUDE.md` points here.
 
 ## What graffy is
 
-A terminal-native agentic harness (Rust, GPL-3.0-or-later) with one
+A terminal-native agentic harness (Rust, Apache-2.0) with one
 non-negotiable invariant: **nothing executes as a raw prompt or skill.**
 Every prompt, imported skill, MCP tool call, compaction step, and chat turn
 is compiled into a typed, budgeted, journaled **graph** that persists as a
@@ -90,7 +90,7 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
    forbidden. When something can't be done, say so loudly (see
    `ToolError::Unavailable`, the collaborative non-TTY bail).
 4. **Decisions live in ADRs** (`docs/adr/`), inflows in `NOTICE.md`
-   (GPLv3-compatible only), deferred ideas in ROADMAP "Tabled" (they must
+   (Apache-2.0-compatible only; no copyleft code, ADR-0013), deferred ideas in ROADMAP "Tabled" (they must
    not evaporate — write them down with design breadcrumbs), field
    observations in `docs/KNOWN-ISSUES.md`.
 5. **Generated things must be lawful**: specs produced by graphify or facade
@@ -138,10 +138,13 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
   `graffy-mcw` exports vocabulary; `graffy-agents` and `graffy-evals` are scaffolds.
   FTS/vectors/temporal recall, learned lessons, model raters, fine-grained claim
   grounding, executable repair graphs, pricing and bundles remain future work.
-- Chat (ADR-0010): steps 1–2 are in — `src/turn.rs` is the shared turn runner
-  both frontends drive (never add a second execution path), and `graffy chat` is
-  the plain-terminal loop. Next: the Ratatui conversation view (step 3), then the
-  run-details view and prompt-to-graph routing (issue #17).
+- Chat (ADR-0010): steps 1–3 are in — `src/turn.rs` is the shared turn runner
+  every frontend drives (never add a second execution path), `graffy chat` is the
+  plain-terminal loop, and `graffy chat --tui` is the Ratatui conversation view.
+  The view records an output receipt only after drawing the answer, and chat
+  approvals need Ctrl chords (typing must never decide a gate) — keep both.
+  Next: prompt-to-graph routing (issue #17). The TUI chat has been exercised in a
+  pseudo-terminal and by render tests, not yet by a human on real terminals.
   Desktop/web is tabled indefinitely. The optional graph inspection view is not
   a prerequisite for chat.
 - After chat: native Windows x64 CI/release builds are a low-priority portability
@@ -157,6 +160,7 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
 cargo test --workspace                       # offline suite; live MCP test is explicitly ignored
 cargo run -- run graffy.builtin.conversation --prompt "hi" --offline --tui
 cargo run -- chat --offline                  # terminal chat; every line is a graph turn (src/turn.rs)
+cargo run -- chat --offline --tui            # Ratatui conversation view (crates/graffy-tui/src/ui/chat.rs)
 cargo run -- run <graph> --prompt "..." --retry auto   # C2 repair-feedback retries
 cargo run -- rate <session-id> [--blinded]   # boundary-transcript HRDM rating (calibration)
 cargo run -- run <graph> --prompt "..." --session <id>  # continue a session (adds an exchange)

@@ -9,7 +9,7 @@ id = "graffy.builtin.reasoning.sequential-thinking"
 name = "Sequential Thinking"
 version = "0.1.0"
 description = "Structured step-by-step reasoning with a critique gate and guarded revision loop."
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
 authors = ["graffy built-ins"]
 tags = ["builtin", "reasoning", "clear-thought"]
 

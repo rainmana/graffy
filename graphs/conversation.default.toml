@@ -9,7 +9,7 @@ id = "graffy.builtin.conversation"
 name = "Default Conversation"
 version = "0.1.0"
 description = "Floor graph enforcing the no-raw-execution invariant for ordinary chat."
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
 authors = ["graffy built-ins"]
 tags = ["builtin", "conversation", "floor"]
 

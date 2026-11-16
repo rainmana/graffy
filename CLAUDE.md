@@ -19,7 +19,7 @@ The five rules that prevent the most damage, restated:
    silent fallbacks. Loud, specific failures.
 5. Decisions → `docs/adr/`; deferred ideas → ROADMAP "Tabled" with design
    breadcrumbs; observations → `docs/KNOWN-ISSUES.md`; license inflows
-   (GPLv3-compatible only) → `NOTICE.md`.
+   (Apache-2.0-compatible only) → `NOTICE.md`.
 
 Owner: W. Alec Akin (@rainmana). Teach as you work, credit his ideas, give
 him exact PowerShell-safe commands (no `&&`) for anything touching tags,

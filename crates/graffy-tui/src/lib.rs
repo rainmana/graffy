@@ -2,7 +2,8 @@
 //!
 //! * [`state`] — the pure fold from journal frames to renderable state
 //!   (terminal-free, unit-tested against real executor runs).
-//! * [`ui`] — live run view, step inspector, novice strip, journal picker.
+//! * [`ui`] — live run view, step inspector, novice strip, journal picker,
+//!   and the conversation view (`ui/chat.rs`, ADR-0010).
 //!
 //! The TUI has no privileged access: it renders exactly the frames the
 //! journal commits (live via the tap, or read back from disk). If it isn't
@@ -13,4 +14,4 @@ pub mod state;
 pub mod ui;
 
 pub use preview::{ReviewDecision, review_spec};
-pub use ui::{run_home, run_live, run_replay};
+pub use ui::{ChatReply, ChatTurn, run_chat, run_home, run_live, run_replay};

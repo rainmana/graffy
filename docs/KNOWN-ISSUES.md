@@ -41,3 +41,14 @@ Each entry says what was seen, what we suspect, and what would confirm it.
   to whichever of chat/approval is waiting.
 - **Status**: known ceiling, recorded at `graffy chat` introduction; not
   reproduced in a test.
+
+## `graffy chat --tui`: composer is append-only
+
+- **What**: the message box supports typing, Backspace and paste, but has no
+  cursor movement (Left/Right/Home/End) or word deletion. Fixing a typo early
+  in a long draft means deleting back to it.
+- **Fix when it bites**: track a cursor index in `ChatState` (`ui/chat.rs`).
+- **Also unverified**: the view was driven in a Linux pseudo-terminal and has
+  render tests at normal and tiny sizes; it has not been looked at by a human
+  on macOS Terminal, Windows Terminal or WSL. Treat layout and color as
+  unreviewed until @rainmana has run it.

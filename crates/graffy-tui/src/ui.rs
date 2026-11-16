@@ -32,6 +32,9 @@ use graffy_core::spec::GraphSpec;
 
 use crate::state::{AppState, state_glyph, state_word, status_word};
 
+mod chat;
+pub use chat::{ChatReply, ChatTurn, run_chat};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Run,
@@ -415,7 +418,12 @@ fn draw(f: &mut Frame, app: &AppState, ui: &mut UiState, finished: bool) {
         .areas(f.area());
         draw_header(f, app, header);
         draw_body(f, app, ui, body);
-        draw_modal(f, ui, modal);
+        draw_modal(
+            f,
+            ui,
+            modal,
+            "[a] approve · [r] reject · ↑/↓ scroll · q cancels",
+        );
         draw_footer(f, app, footer, finished);
     } else {
         let [header, body, footer] = Layout::vertical([
@@ -562,7 +570,7 @@ fn draw_body(f: &mut Frame, app: &AppState, ui: &mut UiState, area: Rect) {
     }
 }
 
-fn draw_modal(f: &mut Frame, ui: &UiState, area: Rect) {
+fn draw_modal(f: &mut Frame, ui: &UiState, area: Rect, keys: &'static str) {
     let Some(prompt) = &ui.approval else { return };
     f.render_widget(
         Paragraph::new(prompt.question.as_str())
@@ -572,7 +580,7 @@ fn draw_modal(f: &mut Frame, ui: &UiState, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(format!(" approval — {} ", prompt.node_id))
-                    .title_bottom("[a] approve · [r] reject · ↑/↓ scroll · q cancels")
+                    .title_bottom(keys)
                     .border_style(Style::new().fg(Color::Yellow)),
             ),
         area,
@@ -683,7 +691,9 @@ mod release_tests {
         });
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 7)).unwrap();
-        terminal.draw(|f| draw_modal(f, &ui, f.area())).unwrap();
+        terminal
+            .draw(|f| draw_modal(f, &ui, f.area(), "keys"))
+            .unwrap();
         let text = terminal
             .backend()
             .buffer()
@@ -696,7 +706,9 @@ mod release_tests {
         for _ in 0..3 {
             handle_approval_key(KeyCode::Down, &mut ui);
         }
-        terminal.draw(|f| draw_modal(f, &ui, f.area())).unwrap();
+        terminal
+            .draw(|f| draw_modal(f, &ui, f.area(), "keys"))
+            .unwrap();
         let text = terminal
             .backend()
             .buffer()
@@ -708,7 +720,7 @@ mod release_tests {
         for (w, h) in [(1, 1), (10, 3)] {
             let mut tiny =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
-            tiny.draw(|f| draw_modal(f, &ui, f.area())).unwrap();
+            tiny.draw(|f| draw_modal(f, &ui, f.area(), "keys")).unwrap();
         }
     }
 }

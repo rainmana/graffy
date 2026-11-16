@@ -7,7 +7,7 @@
 Every prompt, imported skill, tool call, and approval runs through a compiled TOML graph and produces an append-only run journal.
 
 [![CI](https://github.com/rainmana/graffy/actions/workflows/ci.yml/badge.svg)](https://github.com/rainmana/graffy/actions/workflows/ci.yml)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 *Pre-alpha (source-tree version `0.1.0-alpha.6`; tagged releases may trail it). The graph runtime, journals, TUI, providers, MCP facades, graphification, persistence, retries, and metrics work; several larger MCW, memory, agent, and evaluation features remain in development.*
 
@@ -402,6 +402,7 @@ Project guidance:
 
 ## License
 
-[GPL-3.0-or-later](LICENSE).
+[Apache-2.0](LICENSE). Releases up to and including v0.1.0-alpha.6 were published under
+GPL-3.0-or-later; see [ADR-0013](docs/adr/0013-apache-2-relicensing.md).
 
 Third-party concepts and dependencies are credited in [NOTICE.md](NOTICE.md), including the Apache-2.0 [Meta-Context Window Framework](https://github.com/rainmana/mcw-framework) by W. Alec Akin and the MIT-licensed projects that informed parts of graffy's design.

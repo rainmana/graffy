@@ -138,7 +138,7 @@ fn conversation_floor(
             name,
             version: "0.1.0".into(),
             description,
-            license: Some("GPL-3.0-or-later".into()),
+            license: Some("Apache-2.0".into()),
             authors: vec![format!("graphified by graffy ({mode_label})")],
             tags,
         },
