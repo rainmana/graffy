@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Decider setup:** `docs/decider.md` is a step-by-step guide for hosted Jev and a
+  local Strands Decider server (the latter taken from its own documentation and
+  not yet run against graffy). `graffy doctor` now reports whether the
+  decision-model router's settings are usable and where messages would be sent,
+  without contacting the endpoint.
+
 ## v0.1.0-alpha.7 — chat, routing, Apache-2.0 (2026-11-16)
 
 - **CLI help:** `graffy --help` now describes `run` and `init` correctly (their

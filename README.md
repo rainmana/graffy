@@ -173,7 +173,7 @@ Graphs without `route_on` — including everything graffy generates — are neve
 - An unreachable decider, or an unusable answer, fails the turn. It never falls back to phrases.
 - Plain `http://` is accepted only for `localhost`, `127.0.0.1`, and `[::1]`.
 
-Hosted Jev has been exercised end to end. A local Strands Decider server has not yet been run against the adapter; only its published schema was checked.
+Hosted Jev has been exercised end to end. A local Strands Decider server has not yet been run against the adapter; only its published schema was checked. [docs/decider.md](docs/decider.md) is the step-by-step setup for both, and `graffy doctor` reports whether the settings are usable without contacting the endpoint.
 
 Either way, the router is its own journaled run of `graffy.builtin.router`. It is never a conversation turn: it is excluded from session history and exchange counts, and `graffy metrics` reports it separately.
 

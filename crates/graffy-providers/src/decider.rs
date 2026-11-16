@@ -53,8 +53,10 @@ impl HttpDecider {
             .ok_or_else(|| invalid("has no host"))?
             .to_owned();
         if !url.username().is_empty() || url.password().is_some() {
-            return Err(invalid(
-                "must not contain a username or password; use GRAFFY_DECIDER_API_KEY",
+            // Do not echo the URL: it holds a credential.
+            return Err(DeciderError(
+                "decider URL must not contain a username or password; use GRAFFY_DECIDER_API_KEY"
+                    .into(),
             ));
         }
         if url.query().is_some() || url.fragment().is_some() {
@@ -337,6 +339,11 @@ mod tests {
                 "{disguised}"
             );
         }
+        // A credential mistakenly placed in the URL is never echoed back.
+        let leaked = HttpDecider::new("https://user:s3cret@api.example.com", None, None)
+            .err()
+            .unwrap();
+        assert!(!leaked.0.contains("s3cret") && leaked.0.contains("GRAFFY_DECIDER_API_KEY"));
         let prefixed = HttpDecider::new("https://api.example.com:8443/base/", None, None).unwrap();
         assert_eq!(prefixed.endpoint(), "api.example.com:8443");
         assert_eq!(
