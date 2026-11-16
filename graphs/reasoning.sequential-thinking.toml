@@ -14,6 +14,7 @@ authors = ["graffy built-ins"]
 tags = ["builtin", "reasoning", "clear-thought"]
 # Opt-in to prompt routing (ADR-0012): whole-phrase, case-insensitive matches.
 route_on = ["step by step", "think it through", "walk me through your reasoning"]
+route_when = "The person asks for a problem to be reasoned through carefully, one step at a time."
 
 [policy.evidence]
 mode = "strict"

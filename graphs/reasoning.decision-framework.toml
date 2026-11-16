@@ -13,6 +13,7 @@ authors = ["graffy built-ins"]
 tags = ["builtin", "reasoning", "clear-thought", "decision"]
 # Opt-in to prompt routing (ADR-0012): whole-phrase, case-insensitive matches.
 route_on = ["pros and cons", "help me decide", "decide between", "which should i choose", "weigh my options"]
+route_when = "The person wants help choosing between options, weighing trade-offs, or reaching a recommendation."
 
 [policy.evidence]
 mode = "strict"

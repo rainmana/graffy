@@ -1,6 +1,6 @@
 # ADR-0012: Prompt-to-graph routing
 
-- Status: **Accepted; deterministic router implemented (2026-11-16); decision-model router not started**
+- Status: **Accepted; deterministic and decision-model routers implemented (2026-11-16)**
 - Date: 2026-11-15
 - Decider: W. Alec Akin (@rainmana)
 - Related: ADR-0010 ("Later routing"), GitHub issue #17
@@ -14,7 +14,14 @@ two external models he proposed.
 `routed_by_run_id` on the target run's manifest, and the `/chat` override.
 Routing is opt-in per chat for now rather than the default, so existing
 behaviour does not change until it has been used for real.
-**Not implemented:** the decision-model router, graphify-on-the-fly.
+**Implemented:** the decision-model router, behind `graffy chat --route=decider`
+— the `Decider` seam in `graffy_core::route`, the HTTP adapter in
+`graffy-providers/src/decider.rs`, `route_when` criteria in graph specs, and
+the decider fields on the `graph_routing` event. One live three-message check
+against hosted Jev routed as expected; that is a wiring check, not an accuracy
+evaluation. A local Strands Decider server has **not** been run against it —
+only its published schema was read.
+**Not implemented:** graphify-on-the-fly.
 
 ## Decisions (owner)
 
@@ -78,7 +85,13 @@ URL can serve either. Design constraints:
   probabilities, the answering model, token usage — attributed to that model.
   A confidence is the model's own report, not a graffy measurement, and a
   routing choice is never presented as proof the graph was the right one.
-- **The acceptance threshold is an open question.** Strands publishes a
+- **Threshold — resolved for now as "no default":**
+  `GRAFFY_ROUTER_MIN_CONFIDENCE` is required and graffy refuses to start
+  decider routing without it. The owner was asked whether to default to 0.9
+  (citing Strands) and had not answered when this was built, so the option
+  that invents nothing was taken; adopting a cited default later is a
+  one-line change. Background:
+- **The acceptance threshold was an open question.** Strands publishes a
   calibration claim for its own models (answers at confidence ≥ 0.9 are right
   about 95% of the time on its short unseen classification tasks). graffy has
   no such evidence for either model on graffy prompts, so it must not ship an

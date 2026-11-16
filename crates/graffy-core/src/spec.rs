@@ -41,6 +41,11 @@ pub struct GraphMeta {
     /// only when a human names it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub route_on: Vec<String>,
+    /// For a decision-model router: one sentence saying when this graph is
+    /// the right choice. Only read for graphs that opted in with `route_on`;
+    /// the description is used when it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_when: Option<String>,
 }
 
 /// One node declaration.

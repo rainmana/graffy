@@ -402,6 +402,9 @@ pub struct AggregateMetrics {
     pub rating_observations: u64,
     /// Routing runs (ADR-0012) — counted here and in no execution aggregate.
     pub routing_runs: u64,
+    /// Tokens a decision-model router reported spending — kept out of the
+    /// execution token totals, never dropped.
+    pub routing_tokens: u64,
     pub repairs_run_passed: u64,
     /// Run-passed / all repairs (`null` when none ran). NOT causal efficacy.
     pub repair_run_passed_rate: Option<f64>,
@@ -421,7 +424,10 @@ impl AggregateMetrics {
             .iter()
             .filter(|r| !is_rating_observation(r) && !is_routing_run(r))
             .collect();
-        a.routing_runs = rows.iter().filter(|r| is_routing_run(r)).count() as u64;
+        for r in rows.iter().filter(|r| is_routing_run(r)) {
+            a.routing_runs += 1;
+            a.routing_tokens += r.input_tokens + r.output_tokens;
+        }
         for r in rows.iter().filter(|r| is_rating_observation(r)) {
             a.rating_observations += 1;
             a.hrdm_samples += r.hrdm_samples;
@@ -724,6 +730,8 @@ mod tests {
             attempt_group_id: "g-router".into(),
             run_kind: wire::RunKind::Routing as i32,
             status: "succeeded".into(),
+            input_tokens: 40,
+            output_tokens: 1,
             ..Default::default()
         };
         let rows = vec![routing, turn.clone()];
@@ -732,6 +740,11 @@ mod tests {
         assert_eq!(with.runs, without.runs);
         assert_eq!(with.runs_by_status, without.runs_by_status);
         assert_eq!((with.routing_runs, without.routing_runs), (1, 0));
+        assert_eq!(with.input_tokens, without.input_tokens);
+        assert_eq!(
+            with.routing_tokens, 41,
+            "decider tokens are reported, separately"
+        );
         assert_eq!(attempt_groups_from_rows(&rows).len(), 1);
         assert_eq!(sessions_from_rows(&rows)[0].runs, 1);
     }

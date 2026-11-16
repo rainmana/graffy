@@ -184,6 +184,16 @@ message GraphRoutingDecision {
   repeated string considered = 8;
   // Graph ids whose phrases matched (more than one means ambiguous).
   repeated string matched = 9;
+  // Decision-model routing only ("decider"). These are what the model
+  // reported about its own answer — not a graffy measurement — and the
+  // threshold the human configured, below which the floor graph runs.
+  optional double confidence = 10;
+  map<string, double> probabilities = 11;
+  // The concrete model that answered, as the service reported it.
+  string decided_by_model = 12;
+  optional double min_confidence = 13;
+  // Where the prompt was sent to be decided (host[:port]).
+  string decided_at_endpoint = 14;
 }
 
 // ---------------------------------------------------------------------------

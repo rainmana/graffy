@@ -1133,7 +1133,9 @@ version = "0.1.0-alpha.6"
 dependencies = [
  "async-trait",
  "graffy-core",
+ "reqwest 0.13.4",
  "rig-core 0.42.0",
+ "serde_json",
  "tokio",
  "tracing",
 ]

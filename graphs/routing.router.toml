@@ -21,8 +21,9 @@ mode = "strict"
 min_level = "L1"
 
 [policy.budget]
-# The phrase router consults no model; the budget still bounds the run.
-max_tokens = 2000
+# The phrase router consults no model. A decision-model router makes one small
+# call per message, counted here.
+max_tokens = 20000
 max_usd = 0.05
 max_seconds = 30
 

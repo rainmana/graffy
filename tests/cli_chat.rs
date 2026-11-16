@@ -23,9 +23,18 @@ impl Sandbox {
         Self(p)
     }
     fn chat(&self, args: &[&str], input: &str) -> Output {
+        self.chat_env(args, input, &[])
+    }
+    fn chat_env(&self, args: &[&str], input: &str, env: &[(&str, &str)]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_graffy"))
             .env("GRAFFY_HOME", &self.0)
             .env_remove("GRAFFY_DATA_DIR")
+            // The decider is configured only by what a test passes in.
+            .env_remove("GRAFFY_DECIDER_URL")
+            .env_remove("GRAFFY_DECIDER_MODEL")
+            .env_remove("GRAFFY_DECIDER_API_KEY")
+            .env_remove("GRAFFY_ROUTER_MIN_CONFIDENCE")
+            .envs(env.iter().copied())
             .arg("chat")
             .arg("--offline")
             .args(args)
@@ -292,4 +301,131 @@ fn routed_chat_runs_the_router_as_its_own_journaled_run() {
     // A pin and the router cannot both choose the graph.
     let both = h.chat(&["--route", "--graph", "graffy.builtin.conversation"], "");
     assert!(!both.status.success());
+}
+
+/// A local stand-in for a decision-model server: answers every
+/// `POST /v1/systemone` with the same choice. Returns its base URL.
+fn decider_fixture(choice: &'static str, confidence: f64) -> String {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).unwrap_or(0);
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                let done = text.split_once("\r\n\r\n").is_some_and(|(head, sent)| {
+                    let length = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    sent.len() >= length
+                });
+                if done || read == 0 {
+                    break;
+                }
+            }
+            let body = format!(
+                r#"{{"model":"fixture-decider-1","answers":{{"route":{{"type":"choice","choice":"{choice}","confidence":{confidence},"probabilities":{{"{choice}":{confidence}}}}}}},"usage":{{"input_tokens":50,"output_tokens":1}}}}"#
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .ok();
+        }
+    });
+    url
+}
+
+#[test]
+fn decider_routing_follows_the_model_only_above_the_configured_threshold() {
+    const DECISION: &str = "graffy.builtin.reasoning.decision-framework";
+    // No trigger phrase in this message: only the decision model can route it.
+    let message = "Should I rent or buy a flat?\n";
+
+    let h = Sandbox::new();
+    let url = decider_fixture(DECISION, 0.97);
+    let env = [
+        ("GRAFFY_DECIDER_URL", url.as_str()),
+        ("GRAFFY_ROUTER_MIN_CONFIDENCE", "0.9"),
+    ];
+    let o = h.chat_env(&["--route=decider"], message, &env);
+    assert!(o.status.success(), "{}\n{}", out(&o), err(&o));
+    // The human is told, before anything is sent, where messages go.
+    let endpoint = url.trim_start_matches("http://");
+    assert!(out(&o).contains(&format!("every routed message is SENT to {endpoint}")));
+    assert!(out(&o).contains("chose it with confidence 0.97 (your threshold 0.90)"));
+    let runs = h.runs();
+    let routing = runs
+        .iter()
+        .find(|(m, _)| m.run_kind == wire::RunKind::Routing as i32)
+        .unwrap();
+    let decision = graffy_core::route::decision_from(&routing.1).unwrap();
+    assert_eq!(
+        (decision.router.as_str(), decision.chosen_graph_id.as_str()),
+        ("decider", DECISION)
+    );
+    assert_eq!(decision.decided_by_model, "fixture-decider-1");
+    assert_eq!(
+        (decision.confidence, decision.min_confidence),
+        (Some(0.97), Some(0.9))
+    );
+    assert!(
+        runs.iter()
+            .any(|(m, _)| m.graph_id == DECISION && m.routed_by_run_id == routing.0.run_id)
+    );
+
+    // The same answer under a stricter threshold is not followed.
+    let h = Sandbox::new();
+    let strict = [
+        ("GRAFFY_DECIDER_URL", url.as_str()),
+        ("GRAFFY_ROUTER_MIN_CONFIDENCE", "0.99"),
+    ];
+    let o = h.chat_env(&["--route=decider"], message, &strict);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("below your threshold 0.99"));
+    assert!(h.runs().iter().all(|(m, _)| m.graph_id != DECISION));
+}
+
+#[test]
+fn decider_routing_refuses_to_start_on_guessed_or_missing_configuration() {
+    let h = Sandbox::new();
+    let none = h.chat_env(&["--route=decider"], "hi\n", &[]);
+    assert!(!none.status.success());
+    assert!(err(&none).contains("GRAFFY_DECIDER_URL is not set"));
+
+    // No threshold: graffy ships no default.
+    let url = decider_fixture("graffy.builtin.conversation", 0.5);
+    let no_threshold = h.chat_env(
+        &["--route=decider"],
+        "hi\n",
+        &[("GRAFFY_DECIDER_URL", url.as_str())],
+    );
+    assert!(!no_threshold.status.success());
+    assert!(err(&no_threshold).contains("graffy ships no default"));
+
+    // An unreachable decider fails the turn loudly; nothing is routed by guess.
+    let dead = [
+        ("GRAFFY_DECIDER_URL", "http://127.0.0.1:9"),
+        ("GRAFFY_ROUTER_MIN_CONFIDENCE", "0.9"),
+    ];
+    let unreachable = h.chat_env(&["--route=decider"], "hi\n", &dead);
+    assert!(!unreachable.status.success());
+    assert!(err(&unreachable).contains("routing failed"));
+    assert!(!out(&unreachable).contains("reviewed response"));
+    assert!(
+        h.runs()
+            .iter()
+            .all(|(m, _)| m.run_kind == wire::RunKind::Routing as i32)
+    );
 }

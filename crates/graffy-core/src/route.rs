@@ -5,12 +5,20 @@
 //! decision is recorded with its exact reason so a mis-route is auditable and
 //! the constraint stays legible to the human (anti-Constraint-Opacity).
 //!
-//! There is no score and no threshold. A graph is eligible only if its spec
-//! declares `route_on` phrases; exactly one matching graph is selected;
-//! anything else falls back to the floor graph.
+//! A graph is eligible only if its spec declares `route_on` phrases.
+//!
+//! * **Phrases** (default): no score and no threshold. Exactly one matching
+//!   graph is selected; anything else falls back to the floor graph.
+//! * **Decider** (optional): a small decision model picks among the same
+//!   opted-in graphs. [`Decider`] is the only doorway to such a model. What it
+//!   reports — choice, confidence, probabilities — is journaled as its own
+//!   report, and a pick below the human's configured threshold is not followed.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::error::ExecError;
-use crate::exec::{NodeBehavior, NodeCtx, NodeExecutionResult, NodeOutput};
+use crate::exec::{NodeBehavior, NodeCtx, NodeExecutionResult, NodeOutput, sha256_hex};
 use crate::journal::wire;
 use crate::journal::wire::run_event::Event;
 
@@ -20,6 +28,55 @@ pub struct RouteCandidate {
     pub graph_id: String,
     pub name: String,
     pub route_on: Vec<String>,
+    /// When this graph is the right choice, in one sentence — the criterion a
+    /// decision model is given for it.
+    pub route_when: String,
+}
+
+/// What a decision model answered.
+#[derive(Debug, Clone)]
+pub struct DeciderAnswer {
+    pub choice: String,
+    /// The model's own confidence in `choice`, 0–1.
+    pub confidence: f64,
+    pub probabilities: BTreeMap<String, f64>,
+    /// The concrete model that answered, as the service reported it.
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub latency_ms: u64,
+}
+
+/// A decision model could not be consulted, or answered unusably.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{0}")]
+pub struct DeciderError(pub String);
+
+/// The only doorway to a decision model (a "system one" model that picks
+/// among supplied choices instead of generating text). Implemented outside
+/// core, like [`crate::exec::ModelInvoker`].
+#[async_trait::async_trait]
+pub trait Decider: Send + Sync {
+    /// Where content is sent to be decided (`host[:port]`) — disclosed to the
+    /// human and journaled, because the prompt leaves this process.
+    fn endpoint(&self) -> &str;
+
+    /// Choose one of `choices` (name → when it applies) for `content`.
+    async fn choose(
+        &self,
+        content: &str,
+        instructions: &str,
+        choices: &BTreeMap<String, String>,
+    ) -> Result<DeciderAnswer, DeciderError>;
+}
+
+/// Decision-model routing: the decider and the human's acceptance threshold.
+#[derive(Clone)]
+pub struct DeciderRouting {
+    pub decider: Arc<dyn Decider>,
+    /// A pick whose reported confidence is below this is not followed. graffy
+    /// ships no default: the human sets it.
+    pub min_confidence: f64,
 }
 
 /// Lowercased words joined by single spaces; punctuation is a word break.
@@ -78,24 +135,113 @@ pub struct RouterNode {
     pub candidates: Vec<RouteCandidate>,
     /// The graph that runs when nothing is selected (the conversation floor).
     pub floor: RouteCandidate,
+    /// `Some`: a decision model chooses. `None`: trigger phrases decide.
+    pub decider: Option<DeciderRouting>,
 }
 
-#[async_trait::async_trait]
-impl NodeBehavior for RouterNode {
-    async fn execute(&self, ctx: &mut NodeCtx<'_>) -> Result<NodeExecutionResult, ExecError> {
-        let ids = |indexes: &[usize]| -> Vec<String> {
-            indexes
-                .iter()
-                .map(|i| self.candidates[*i].graph_id.clone())
-                .collect()
-        };
-        let mut decision = wire::GraphRoutingDecision {
+const DECIDER_INSTRUCTIONS: &str = "Which workflow best fits this request? Choose the conversation option unless another clearly fits.";
+
+impl RouterNode {
+    /// Ask the decision model. Its pick is followed only when it names an
+    /// opted-in graph with at least the configured confidence.
+    async fn decide(
+        &self,
+        ctx: &mut NodeCtx<'_>,
+        routing: &DeciderRouting,
+        decision: &mut wire::GraphRoutingDecision,
+    ) -> Result<RouteCandidate, ExecError> {
+        let endpoint = routing.decider.endpoint().to_owned();
+        decision.router = "decider".into();
+        decision.min_confidence = Some(routing.min_confidence);
+        decision.decided_at_endpoint = endpoint.clone();
+        if self.candidates.is_empty() {
+            // Nothing to choose between: do not send the prompt anywhere.
+            decision.fallback = true;
+            decision.reason = format!(
+                "running '{}': no registered graph has opted in to routing, so the decision model was not consulted",
+                self.floor.name
+            );
+            return Ok(self.floor.clone());
+        }
+        let mut choices: BTreeMap<String, String> = self
+            .candidates
+            .iter()
+            .map(|c| (c.graph_id.clone(), c.route_when.clone()))
+            .collect();
+        choices.insert(self.floor.graph_id.clone(), self.floor.route_when.clone());
+        let failed = |reason: String| ExecError::NodeFailed(ctx.node.id.clone(), reason);
+        let answer = routing
+            .decider
+            .choose(ctx.prompt, DECIDER_INSTRUCTIONS, &choices)
+            .await
+            .map_err(|err| failed(format!("decision model at {endpoint}: {err}")))?;
+        // The call is a model call: journaled, and counted against the budget.
+        ctx.records.push(Event::ModelCall(wire::ModelCallRecord {
             node_id: ctx.node.id.clone(),
-            router: "phrases".into(),
-            considered: self.candidates.iter().map(|c| c.graph_id.clone()).collect(),
-            ..Default::default()
+            provider: endpoint.clone(),
+            model: answer.model.clone(),
+            purpose: "route".into(),
+            input_tokens: answer.input_tokens,
+            output_tokens: answer.output_tokens,
+            cost_usd: 0.0,
+            latency_ms: answer.latency_ms,
+            streamed: false,
+            request_sha256: sha256_hex(
+                format!(
+                    "{DECIDER_INSTRUCTIONS}\n---\n{}\n---\n{choices:?}",
+                    ctx.prompt
+                )
+                .as_bytes(),
+            ),
+        }));
+        if !(0.0..=1.0).contains(&answer.confidence) {
+            return Err(failed(format!(
+                "decision model at {endpoint} reported confidence {} outside 0–1",
+                answer.confidence
+            )));
+        }
+        decision.confidence = Some(answer.confidence);
+        decision.probabilities = answer.probabilities.clone().into_iter().collect();
+        decision.decided_by_model = answer.model.clone();
+        let who = format!("decision model {} at {endpoint}", answer.model);
+        if answer.choice == self.floor.graph_id {
+            decision.fallback = true;
+            decision.reason = format!(
+                "running '{}': {who} chose plain conversation (confidence {:.2})",
+                self.floor.name, answer.confidence
+            );
+            return Ok(self.floor.clone());
+        }
+        let Some(picked) = self.candidates.iter().find(|c| c.graph_id == answer.choice) else {
+            return Err(failed(format!(
+                "{who} answered '{}', which is not one of the offered graphs",
+                answer.choice
+            )));
         };
-        let chosen = match select(ctx.prompt, &self.candidates) {
+        decision.matched = vec![picked.graph_id.clone()];
+        if answer.confidence < routing.min_confidence {
+            decision.fallback = true;
+            decision.reason = format!(
+                "running '{}': {who} leaned to '{}' with confidence {:.2}, below your threshold {:.2}",
+                self.floor.name, picked.name, answer.confidence, routing.min_confidence
+            );
+            return Ok(self.floor.clone());
+        }
+        decision.reason = format!(
+            "running '{}': {who} chose it with confidence {:.2} (your threshold {:.2})",
+            picked.name, answer.confidence, routing.min_confidence
+        );
+        Ok(picked.clone())
+    }
+
+    /// Deterministic trigger-phrase routing.
+    fn match_phrases(
+        &self,
+        prompt: &str,
+        decision: &mut wire::GraphRoutingDecision,
+    ) -> RouteCandidate {
+        decision.router = "phrases".into();
+        match select(prompt, &self.candidates) {
             Selection::Graph { index, phrase } => {
                 let chosen = &self.candidates[index];
                 decision.reason = format!(
@@ -104,7 +250,7 @@ impl NodeBehavior for RouterNode {
                 );
                 decision.matched = vec![chosen.graph_id.clone()];
                 decision.matched_phrase = phrase;
-                chosen
+                chosen.clone()
             }
             Selection::NoMatch => {
                 decision.fallback = true;
@@ -112,18 +258,36 @@ impl NodeBehavior for RouterNode {
                     "running '{}': no trigger phrase of a routable graph appears in your message",
                     self.floor.name
                 );
-                &self.floor
+                self.floor.clone()
             }
             Selection::Ambiguous(indexes) => {
                 decision.fallback = true;
-                decision.matched = ids(&indexes);
+                decision.matched = indexes
+                    .iter()
+                    .map(|i| self.candidates[*i].graph_id.clone())
+                    .collect();
                 decision.reason = format!(
                     "running '{}': your message matches more than one graph ({}), so none was chosen",
                     self.floor.name,
                     decision.matched.join(", ")
                 );
-                &self.floor
+                self.floor.clone()
             }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl NodeBehavior for RouterNode {
+    async fn execute(&self, ctx: &mut NodeCtx<'_>) -> Result<NodeExecutionResult, ExecError> {
+        let mut decision = wire::GraphRoutingDecision {
+            node_id: ctx.node.id.clone(),
+            considered: self.candidates.iter().map(|c| c.graph_id.clone()).collect(),
+            ..Default::default()
+        };
+        let chosen = match &self.decider {
+            Some(routing) => self.decide(ctx, routing, &mut decision).await?,
+            None => self.match_phrases(ctx.prompt, &mut decision),
         };
         decision.chosen_graph_id = chosen.graph_id.clone();
         decision.chosen_graph_name = chosen.name.clone();
@@ -153,11 +317,13 @@ mod tests {
                 graph_id: "t.decide".into(),
                 name: "Decide".into(),
                 route_on: vec!["pros and cons".into(), "decide".into()],
+                route_when: String::new(),
             },
             RouteCandidate {
                 graph_id: "t.steps".into(),
                 name: "Steps".into(),
                 route_on: vec!["step by step".into()],
+                route_when: String::new(),
             },
         ]
     }
