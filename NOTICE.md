@@ -18,6 +18,7 @@ dependency); every other package offers a permissive license.
 | [MemPalace](https://github.com/MemPalace/mempalace) | MIT | Design reference: layered wake-up memory (L0–L3), verbatim-first storage, temporal knowledge graph with validity windows. |
 | Clear-Thought MCP server lineage (waldzellai et al.) | MIT | Catalog of reasoning patterns (sequential thinking, mental models, decision frameworks, OODA, collaborative reasoning…) reimplemented as graffy graph templates. |
 | [LangConfig](https://github.com/LangConfig/langconfig) | MIT | Design reference: node-type taxonomy, portable workflow configs, live execution + replay UX, seeded template library. |
+| [unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation) | MIT OR Apache-2.0 | Grapheme-cluster boundaries for the chat composer (`graffy-tui`); already in the tree through ratatui at the same version. |
 | [reqwest](https://github.com/seanmonstar/reqwest) | MIT OR Apache-2.0 | Direct HTTP client for the decision-model router (`graffy-providers`); already in the tree through rig-core at the same version. |
 | TypeSafe AI "System One" API (Jev) and [Strands Decider](https://github.com/strands-labs/strands-decider) (Apache-2.0) | — | Wire shape only (`POST /v1/systemone`): graffy's adapter is written against their published request/response schemas. No code is vendored and neither is bundled; the user points graffy at a service they run or subscribe to. |
 
