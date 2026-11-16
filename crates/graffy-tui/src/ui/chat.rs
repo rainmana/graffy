@@ -207,12 +207,20 @@ impl ChatState {
     }
 }
 
-/// Greedy word wrap by display width; over-long words are split.
+/// Greedy word wrap by display width; over-long words are split. A line's
+/// leading indentation is kept, and repeated on its continuation lines, so
+/// code and YAML in a recorded answer keep their structure.
 fn wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
+    let full_width = width.max(1);
     let cells = |s: &str| Span::raw(s.to_owned()).width();
     let mut out = Vec::new();
     for paragraph in text.split('\n') {
+        let body = paragraph.trim_start_matches(' ');
+        // Never let indentation take more than half the line.
+        let indent = " ".repeat((paragraph.len() - body.len()).min(full_width / 2));
+        let width = full_width - indent.len();
+        let paragraph = body;
+        let first = out.len();
         let mut line = String::new();
         for word in paragraph.split(' ') {
             let mut word = word.to_owned();
@@ -236,6 +244,11 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
             line.push_str(&word);
         }
         out.push(line);
+        for line in &mut out[first..] {
+            if !line.is_empty() {
+                line.insert_str(0, &indent);
+            }
+        }
     }
     out
 }
@@ -735,6 +748,11 @@ mod tests {
         assert_eq!(wrap("aa bb cc", 5), ["aa bb", "cc"]);
         assert_eq!(wrap("abcdefgh", 3), ["abc", "def", "gh"]);
         assert_eq!(wrap("one\n\ntwo", 10), ["one", "", "two"]);
+        // Indentation is content: kept, and carried onto continuation lines.
+        assert_eq!(wrap("    return value", 80), ["    return value"]);
+        assert_eq!(wrap("  key: aa bb", 9), ["  key: aa", "  bb"]);
+        assert_eq!(wrap("a  b", 80), ["a  b"]);
+        assert!(wrap("          deep", 6).iter().all(|l| l.len() <= 6));
         // Wide characters take two cells each.
         assert!(
             wrap("日本語日本語", 4)
