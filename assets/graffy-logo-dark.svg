@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 150" width="560" height="150" role="img" aria-labelledby="t d">
+  <title id="t">graffy</title>
+  <desc id="d">A five-node graph, intake to respond, with one guarded loop back from verify to draft, beside the word graffy.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- forward edges: intake → ground → draft → verify → respond -->
+    <path d="M38 96 L78 62 M94 56 L134 56 M150 62 L190 96 M206 96 L232 96" stroke="#94a3b8" stroke-width="3"/>
+    <path d="M226 90 L234 96 L226 102" stroke="#94a3b8" stroke-width="3"/>
+    <!-- the guarded back-edge: verify → draft -->
+    <path d="M190 108 C 168 138, 140 120, 142 72" stroke="#e879f9" stroke-width="3" stroke-dasharray="2 8"/>
+    <path d="M135 80 L142 70 L150 79" stroke="#e879f9" stroke-width="3"/>
+  </g>
+  <g stroke-width="3">
+    <circle cx="30" cy="102" r="10" fill="#0d1117" stroke="#e2e8f0"/>
+    <circle cx="86" cy="56" r="10" fill="#0d1117" stroke="#e2e8f0"/>
+    <circle cx="142" cy="56" r="10" fill="#0d1117" stroke="#e2e8f0"/>
+    <circle cx="198" cy="102" r="10" fill="#0d1117" stroke="#e879f9"/>
+    <circle cx="246" cy="96" r="12" fill="#22d3ee" stroke="#22d3ee"/>
+  </g>
+  <text x="286" y="108" font-family="ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="62" font-weight="700" letter-spacing="-1" fill="#e2e8f0">graffy</text>
+</svg>

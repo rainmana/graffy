@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.1.0-alpha.7 — chat, routing, Apache-2.0 (2026-11-16)
 
+- **CLI help:** `graffy --help` now describes `run` and `init` correctly (their
+  descriptions were attached to the wrong commands).
 - **Decision-model router (ADR-0012; owner's idea):** `graffy chat --route=decider`
   asks a small decision model which opted-in graph a message should run on,
   instead of matching trigger phrases. One HTTP adapter
@@ -73,7 +75,7 @@
 - **TUI logging:** default log output is off while a TUI owns the screen (log
   lines were being drawn over the live view); `-v` or `RUST_LOG` still enables it.
 
-## Unreleased (v0.1.0-alpha.6)
+## v0.1.0-alpha.6 — reliability and MCW recording (2026-11-15)
 
 - **Release reliability:** invalid support floors, evidence modes and unsupported
   routing policies fail before execution. Existing journal paths are preserved.

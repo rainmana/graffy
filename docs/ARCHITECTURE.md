@@ -1,6 +1,6 @@
 # graffy architecture
 
-Current implementation: alpha.6 (2026-10-17). Decisions live in [ADRs](adr/README.md).
+Current implementation: alpha.7 (2026-11-16); the sections below were last reviewed in full for alpha.6 and do not yet describe chat or routing — see AGENT.md and ADR-0010/0012. Decisions live in [ADRs](adr/README.md).
 
 ## Runtime and ownership
 

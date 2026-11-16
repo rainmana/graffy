@@ -38,7 +38,6 @@ struct Cli {
 enum Command {
     /// Open the TUI journal browser (pick past runs to inspect).
     Tui,
-    /// Execute a TOML graph spec against a prompt.
     /// Create the graffy home (default ~/.graffy) and seed the store.
     Init,
     /// Fold run journals into research metrics (the MCW dataset, aggregated).
@@ -71,6 +70,7 @@ enum Command {
         #[arg(long)]
         segmentation: Option<PathBuf>,
     },
+    /// Execute a TOML graph spec against a prompt.
     Run {
         /// Path to a TOML graph spec (see graphs/), or a registered graph id.
         spec: String,
@@ -633,7 +633,9 @@ async fn run_graph(
     graffy_core::graph::CompiledGraph::compile(&spec)?;
     let max_attempts = max_attempts_from(retry.as_deref())?;
     if tui && (max_attempts > 1 || session.is_some() || correction) {
-        anyhow::bail!("--retry, --session and --correction require plain CLI mode in alpha.6");
+        anyhow::bail!(
+            "--retry, --session and --correction require plain CLI mode; `graffy chat --tui` is the interactive view"
+        );
     }
     if correction && session.is_none() {
         anyhow::bail!("--correction requires --session so the repair has conversation context");
