@@ -14,6 +14,7 @@ use ratatui::crossterm::event::{
     KeyModifiers, MouseEventKind,
 };
 use ratatui::crossterm::execute;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 
@@ -74,6 +75,10 @@ enum Action {
 struct ChatState {
     entries: Vec<Entry>,
     input: String,
+    /// Byte offset of the cursor in `input`, always on a grapheme-cluster
+    /// boundary: what a person sees as one character, such as a joined emoji
+    /// or a letter with a combining accent, is never split.
+    cursor: usize,
     /// Lines scrolled up from the newest line (0 = following the bottom).
     scroll_back: u16,
     busy: bool,
@@ -121,8 +126,29 @@ impl ChatState {
     }
 
     fn on_paste(&mut self, text: &str) {
-        self.input
-            .push_str(&clean(&text.replace("\r\n", "\n").replace('\r', "\n")));
+        self.insert(&clean(&text.replace("\r\n", "\n").replace('\r', "\n")));
+    }
+
+    /// Insert text at the cursor.
+    fn insert(&mut self, text: &str) {
+        self.input.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
+    /// Byte offset of the grapheme boundary before the cursor.
+    fn before_cursor(&self) -> usize {
+        self.input[..self.cursor]
+            .grapheme_indices(true)
+            .next_back()
+            .map_or(0, |(index, _)| index)
+    }
+
+    /// Byte offset of the grapheme boundary after the cursor.
+    fn after_cursor(&self) -> usize {
+        self.input[self.cursor..]
+            .graphemes(true)
+            .next()
+            .map_or(self.cursor, |cluster| self.cursor + cluster.len())
     }
 
     fn on_key(&mut self, key: KeyEvent) -> Action {
@@ -137,8 +163,30 @@ impl ChatState {
             }
             KeyCode::Enter => return self.submit(),
             KeyCode::Backspace => {
-                self.input.pop();
+                let start = self.before_cursor();
+                self.input.replace_range(start..self.cursor, "");
+                self.cursor = start;
             }
+            KeyCode::Delete => {
+                let end = self.after_cursor();
+                self.input.replace_range(self.cursor..end, "");
+            }
+            // Ctrl-W: delete the word before the cursor, and the spaces after it.
+            KeyCode::Char('w') if ctrl => {
+                let before = &self.input[..self.cursor];
+                let word_end = before.trim_end_matches(char::is_whitespace).len();
+                let start = before[..word_end]
+                    .rfind(char::is_whitespace)
+                    .map_or(0, |i| {
+                        i + before[i..].chars().next().map_or(1, char::len_utf8)
+                    });
+                self.input.replace_range(start..self.cursor, "");
+                self.cursor = start;
+            }
+            KeyCode::Left => self.cursor = self.before_cursor(),
+            KeyCode::Right => self.cursor = self.after_cursor(),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.input.len(),
             // Scrolling needs no PageUp/PageDown key (laptop keyboards): arrows
             // move a line, Ctrl-U / Ctrl-D half a page as in vim. Plain letters
             // stay text, so j/k cannot scroll while the composer has focus.
@@ -149,10 +197,8 @@ impl ChatState {
             KeyCode::PageUp => self.scroll(10),
             KeyCode::PageDown => self.scroll(-10),
             KeyCode::Tab if !self.busy => return Action::Details,
-            // ponytail: append-only editing (no cursor movement inside the
-            // draft). Add a cursor index if editing mid-line is missed.
             KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                self.input.push(c);
+                self.insert(c.encode_utf8(&mut [0; 4]));
                 self.hint = None;
             }
             _ => {}
@@ -178,6 +224,7 @@ impl ChatState {
             return Action::None;
         }
         self.input.clear();
+        self.cursor = 0;
         self.hint = None;
         if text == "/new" {
             self.push(
@@ -234,6 +281,31 @@ impl ChatState {
     }
 }
 
+/// Break text into lines of at most `width` cells, between any two grapheme
+/// clusters. Unlike [`wrap`] it never moves or drops anything, so a position
+/// in the text maps to exactly one place on screen — what a text cursor
+/// needs. A cluster (a joined emoji, a letter plus accent) is measured and
+/// kept whole.
+fn hard_wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        let mut cells = 0;
+        for cluster in paragraph.graphemes(true) {
+            let w = Span::raw(cluster).width();
+            if cells + w > width && !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+                cells = 0;
+            }
+            line.push_str(cluster);
+            cells += w;
+        }
+        out.push(line);
+    }
+    out
+}
+
 /// Greedy word wrap by display width; over-long words are split. A line's
 /// leading indentation is kept, and repeated on its continuation lines, so
 /// code and YAML in a recorded answer keep their structure.
@@ -256,12 +328,12 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
             }
             while cells(&word) > width {
                 let mut head = String::new();
-                while let Some(c) = word.chars().next() {
-                    if !head.is_empty() && cells(&head) + cells(&c.to_string()) > width {
+                while let Some(cluster) = word.graphemes(true).next().map(str::to_owned) {
+                    if !head.is_empty() && cells(&head) + cells(&cluster) > width {
                         break;
                     }
-                    head.push(c);
-                    word.drain(..c.len_utf8());
+                    head.push_str(&cluster);
+                    word.drain(..cluster.len());
                 }
                 out.push(head);
             }
@@ -529,10 +601,20 @@ fn draw_chat(
     app: &AppState,
     ui: &UiState,
 ) {
-    let draft: Vec<String> = wrap(
-        &format!("> {}", chat.input),
-        f.area().width.saturating_sub(2) as usize,
-    );
+    let draft_width = f.area().width.saturating_sub(2) as usize;
+    let draft: Vec<String> = hard_wrap(&format!("> {}", chat.input), draft_width);
+    // Where the cursor falls: wrap only the text before it. Hard wrapping is
+    // prefix-stable, so this is exact.
+    let before = hard_wrap(&format!("> {}", &chat.input[..chat.cursor]), draft_width);
+    let cursor_line = before.len() - 1;
+    let mut cursor_col = before.last().map_or(0, |l| Span::raw(l.clone()).width());
+    // At the right edge the next character starts a new line.
+    let cursor_line = if cursor_col >= draft_width.max(1) && cursor_line + 1 < draft.len() {
+        cursor_col = 0;
+        cursor_line + 1
+    } else {
+        cursor_line
+    };
     let composer_height = (draft.len() as u16).clamp(1, 6) + 2;
     let modal_height = if ui.approval.is_some() { 10 } else { 0 };
     let [header, body, modal, composer, footer] = Layout::vertical([
@@ -582,11 +664,14 @@ fn draw_chat(
         );
     }
 
-    // Show the tail of a long draft so the cursor line stays visible.
+    // Show the window of a long draft that contains the cursor line.
     let visible = (composer_height - 2) as usize;
-    let tail = &draft[draft.len().saturating_sub(visible)..];
+    let first = cursor_line
+        .saturating_sub(visible.saturating_sub(1))
+        .min(draft.len().saturating_sub(visible));
+    let window = &draft[first..(first + visible).min(draft.len())];
     f.render_widget(
-        Paragraph::new(tail.join("\n")).block(Block::default().borders(Borders::ALL).title(
+        Paragraph::new(window.join("\n")).block(Block::default().borders(Borders::ALL).title(
             if chat.busy {
                 " message (a turn is running) "
             } else {
@@ -596,10 +681,9 @@ fn draw_chat(
         composer,
     );
     if ui.approval.is_none() {
-        let last = tail.last().map_or(0, |l| Span::raw(l.clone()).width()) as u16;
         f.set_cursor_position((
-            composer.x + 1 + last.min(composer.width.saturating_sub(3)),
-            composer.y + tail.len() as u16,
+            composer.x + 1 + (cursor_col as u16).min(composer.width.saturating_sub(3)),
+            composer.y + 1 + (cursor_line - first) as u16,
         ));
     }
 
@@ -795,6 +879,84 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("! note") && screen.contains("SENT to decider.example"));
+    }
+
+    #[test]
+    fn the_draft_can_be_edited_anywhere_including_multibyte_text() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut chat = ChatState::default();
+        type_text(&mut chat, "helo wörld");
+        // Fix the typo near the start without deleting what follows.
+        chat.on_key(key(KeyCode::Home));
+        for _ in 0..3 {
+            chat.on_key(key(KeyCode::Right));
+        }
+        chat.on_key(key(KeyCode::Char('l')));
+        assert_eq!(chat.input, "hello wörld");
+        // Left/Right and Backspace/Delete step over whole characters.
+        chat.on_key(key(KeyCode::End));
+        for _ in 0..3 {
+            chat.on_key(key(KeyCode::Left));
+        }
+        chat.on_key(key(KeyCode::Backspace)); // removes 'ö' (two bytes)
+        chat.on_key(key(KeyCode::Delete)); // removes 'r'
+        assert_eq!(chat.input, "hello wld");
+        // Moving past either end is harmless.
+        chat.on_key(key(KeyCode::Home));
+        chat.on_key(key(KeyCode::Left));
+        chat.on_key(key(KeyCode::Backspace));
+        chat.on_key(key(KeyCode::End));
+        chat.on_key(key(KeyCode::Right));
+        chat.on_key(key(KeyCode::Delete));
+        assert_eq!(chat.input, "hello wld");
+        // Ctrl-W removes the word before the cursor.
+        type_text(&mut chat, "  extra ");
+        chat.on_key(ctrl('w'));
+        assert_eq!(chat.input, "hello wld  ");
+        chat.on_key(ctrl('w'));
+        assert_eq!(chat.input, "hello ");
+        // Paste lands at the cursor, and sending resets it.
+        chat.on_key(key(KeyCode::Home));
+        chat.on_paste(">> ");
+        assert_eq!(chat.input, ">> hello ");
+        assert!(matches!(
+            chat.on_key(key(KeyCode::Enter)),
+            Action::Submit { .. }
+        ));
+        assert_eq!((chat.input.as_str(), chat.cursor), ("", 0));
+    }
+
+    #[test]
+    fn hard_wrap_never_moves_a_character() {
+        assert_eq!(hard_wrap("abcdefg", 3), ["abc", "def", "g"]);
+        assert_eq!(hard_wrap("a b  c", 4), ["a b ", " c"]);
+        assert_eq!(hard_wrap("one\n\ntwo", 10), ["one", "", "two"]);
+        assert_eq!(hard_wrap("日本語", 4), ["日本", "語"]);
+        assert_eq!(hard_wrap("", 5), [""]);
+        // A joined emoji is one glyph: it moves to the next line whole, and is
+        // never split into its pictographs.
+        let coder = "\u{1F469}\u{200D}\u{1F4BB}";
+        let cells = Span::raw(coder).width();
+        let lines = hard_wrap(&format!("> aaaa{coder}"), 6 + cells);
+        assert_eq!(lines, [format!("> aaaa{coder}")]);
+        let lines = hard_wrap(&format!("> aaaa{coder}"), 6 + cells - 1);
+        assert_eq!(lines, ["> aaaa".to_owned(), coder.to_owned()]);
+        assert_eq!(wrap(&format!("{coder}{coder}"), cells), [coder, coder]);
+    }
+
+    #[test]
+    fn the_cursor_treats_a_joined_emoji_or_accented_letter_as_one_character() {
+        let coder = "\u{1F469}\u{200D}\u{1F4BB}";
+        let accented = "e\u{301}"; // 'e' + combining acute accent
+        let mut chat = ChatState::default();
+        chat.on_paste(&format!("a{coder}{accented}b"));
+        chat.on_key(key(KeyCode::Left)); // before 'b'
+        chat.on_key(key(KeyCode::Left)); // before the accented letter, not inside it
+        assert_eq!(&chat.input[chat.cursor..], format!("{accented}b"));
+        chat.on_key(key(KeyCode::Backspace)); // the whole emoji goes
+        assert_eq!(chat.input, format!("a{accented}b"));
+        chat.on_key(key(KeyCode::Delete)); // the letter and its accent go together
+        assert_eq!(chat.input, "ab");
     }
 
     #[test]

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Chat TUI composer:** the message box has a cursor. `←` / `→`, `Home` / `End`,
+  `Delete`, and `Ctrl-W` edit the draft anywhere, and paste lands at the cursor.
+  Movement, deletion and wrapping work on grapheme clusters, so a joined emoji or
+  a letter with a combining accent is one character and is never split. The draft
+  is wrapped cluster by cluster so the cursor is drawn where the next keystroke
+  lands.
 - **Decider setup:** `docs/decider.md` is a step-by-step guide for hosted Jev and a
   local Strands Decider server (the latter taken from its own documentation and
   not yet run against graffy). `graffy doctor` now reports whether the

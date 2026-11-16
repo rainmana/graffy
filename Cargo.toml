@@ -63,6 +63,9 @@ crossterm = "0.29"
 
 # --- pinned now, wired in later phases ---
 rmcp = { version = "3.1", default-features = false, features = ["client", "transport-child-process", "transport-io"] } # official Rust MCP SDK — graffy-mcp
+# Grapheme clusters for the chat composer (graffy-tui). Already resolved through
+# ratatui at this version, so no new crate enters the tree — MIT OR Apache-2.0.
+unicode-segmentation = "1.13"
 # Direct HTTP for the decision-model router (graffy-providers). Same version
 # rig-core already resolves, so no new crate enters the tree — MIT OR Apache-2.0.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
