@@ -2334,6 +2334,27 @@ async fn doctor() -> anyhow::Result<()> {
         let set = std::env::var(key).is_ok_and(|v| !v.is_empty());
         println!("  {key:<20} {}", if set { "set" } else { "-" });
     }
+    // The decision-model router (`chat --route=decider`). Checked exactly as
+    // chat would check it, without contacting the endpoint.
+    println!("\ndecision-model router (chat --route=decider; nothing is contacted here):");
+    if std::env::var("GRAFFY_DECIDER_URL").is_ok_and(|v| !v.trim().is_empty()) {
+        match decider_from_env() {
+            Ok(routing) => println!(
+                "  ready — messages would be sent to {}; picks below confidence {:.2} are not followed",
+                routing.decider.endpoint(),
+                routing.min_confidence
+            ),
+            Err(err) => println!("  not usable: {err}"),
+        }
+    } else {
+        println!(
+            "  not configured — set GRAFFY_DECIDER_URL and GRAFFY_ROUTER_MIN_CONFIDENCE (docs/decider.md)"
+        );
+    }
+    for key in ["GRAFFY_DECIDER_MODEL", "GRAFFY_DECIDER_API_KEY"] {
+        let set = std::env::var(key).is_ok_and(|v| !v.is_empty());
+        println!("  {key:<24} {}", if set { "set" } else { "-" });
+    }
     Ok(())
 }
 

@@ -124,6 +124,14 @@ Goal: a stranger can watch a prompt refuse to run raw.
   parts under Apache-2.0, and the inflow is then recorded in `NOTICE.md`. Ideas
   and designs carry no such restriction. Keep the accessibility rules (glyph AND word,
   minimal motion, plain-terminal parity) when adding motion or color.
+- **Home page and docs site at graffy.dev — lower priority than the tool**
+  (owner request, 2026-11-16; issue #25): a clean, minimal static site on a
+  small static-site generator, using the README logo (`assets/graffy-logo-*.svg`),
+  hosted on the owner's Cloudflare domain. Breadcrumbs: generate docs from the
+  README, ADRs and CHANGELOG rather than keeping a second copy; the honest-values
+  rule and the "Current boundaries" list apply to marketing copy too; record the
+  generator choice in an ADR and any theme or asset inflow in `NOTICE.md`;
+  reproducible `--offline` terminal demos explain the tool faster than prose.
 - **Theme engine**: first-class TUI themes — Catppuccin, Dracula, and Nord out of the box,
   plus user-defined theme files (a `themes/*.toml` format in the same durable spirit as graph
   specs); optional Unicode / Nerd-Font icon sets with a plain-ASCII fallback that is always
