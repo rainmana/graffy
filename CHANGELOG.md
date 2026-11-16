@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Prompt-to-graph routing, deterministic (ADR-0012, issue #17):**
+  `graffy chat --route` (plain and `--tui`) routes each message onto a registered
+  graph that opted in with `route_on` trigger phrases in its `[graph]` table.
+  Matching is whole-phrase and case-insensitive; exactly one matching graph is
+  chosen, and no match or more than one falls back to plain conversation — no
+  scores, no threshold. The router is its own journaled graph run
+  (`graffy.builtin.router`, run kind `ROUTING`, event `graph_routing`): it records
+  the reason, is shown to the human as one line, and is excluded from session
+  history, exchanges, attempt groups and execution metrics (`routing_runs` counts
+  it). The target run's manifest names its routing run. `/chat <text>` skips
+  routing for one message. Graphs without `route_on` — including every generated
+  graph — stay explicit-only. Decision Framework and Sequential Thinking opt in.
+  `--route` cannot be combined with `--graph`. The decision-model router
+  (Jev / Strands Decider) is not implemented yet.
 - **License: Apache-2.0** (owner decision, 2026-11-14; ADR-0013). graffy moves from
   GPL-3.0-or-later to Apache-2.0 from this point on. Releases up to v0.1.0-alpha.6 remain
   available under the GPL terms they shipped with. Package metadata, built-in graphs,

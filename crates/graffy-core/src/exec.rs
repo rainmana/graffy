@@ -1205,6 +1205,8 @@ pub struct RunInput {
     pub attempt_index: u32,
     /// The prior attempt's run id when this is an automatic retry.
     pub retry_of_run_id: Option<String>,
+    /// The routing run that selected this graph for the prompt (ADR-0012).
+    pub routed_by_run_id: Option<String>,
     /// Kind of run; Unspecified resolves to InitialAttempt or
     /// AutomaticRetry (when feedback / retry_of is present).
     pub run_kind: i32,
@@ -1353,6 +1355,7 @@ impl Executor {
             attempt_index,
             retry_of_run_id: input.retry_of_run_id.clone().unwrap_or_default(),
             run_kind: run_kind as i32,
+            routed_by_run_id: input.routed_by_run_id.clone().unwrap_or_default(),
         }))?;
 
         let mut ledger: Vec<mcw::InformationUnit> = Vec::new();
@@ -1443,6 +1446,9 @@ impl Executor {
         // frontend records delivery separately after output has been flushed.
         let mut pending_response: Option<(String, String, String)> = None;
         let mut final_text: Option<String> = None;
+        // A routing run answers nothing; its result is the recorded decision.
+        let is_routing = run_kind == wire::RunKind::Routing;
+        let mut routing_recorded = false;
         let mut notes: Vec<String> = Vec::new();
         let mut forced_status: Option<wire::RunStatus> = None;
 
@@ -1572,6 +1578,9 @@ impl Executor {
                 })
             });
             let records = std::mem::take(&mut ctx.records);
+            routing_recorded |= records
+                .iter()
+                .any(|record| matches!(record, Event::GraphRouting(_)));
             drop(ctx);
 
             for event in records {
@@ -1767,7 +1776,10 @@ impl Executor {
                     .source
                     .as_ref()
                     .is_some_and(|a| a.kind == mcw::actor_ref::ActorKind::Human as i32);
+                // A routing run reads the prompt but is not a conversation
+                // turn: it records no boundary contribution (ADR-0012).
                 if human_src
+                    && !is_routing
                     && (iu.kind == mcw::IuKind::Goal as i32
                         || iu.kind == mcw::IuKind::Correction as i32)
                 {
@@ -1861,7 +1873,8 @@ impl Executor {
             }
         }
 
-        let status = forced_status.unwrap_or(if final_text.is_some() {
+        let done = final_text.is_some() || (is_routing && routing_recorded);
+        let status = forced_status.unwrap_or(if done {
             wire::RunStatus::Succeeded
         } else {
             wire::RunStatus::Failed

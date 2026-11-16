@@ -36,6 +36,11 @@ pub struct GraphMeta {
     pub authors: Vec<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Trigger phrases that opt this graph in to automatic prompt routing
+    /// (ADR-0012). Empty — the default — means explicit-only: the graph runs
+    /// only when a human names it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_on: Vec<String>,
 }
 
 /// One node declaration.

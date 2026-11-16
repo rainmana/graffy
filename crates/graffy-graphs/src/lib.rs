@@ -27,9 +27,14 @@ pub const SEQUENTIAL_THINKING_TOML: &str =
 pub const DECISION_FRAMEWORK_TOML: &str =
     include_str!("../../../graphs/reasoning.decision-framework.toml");
 
+/// The prompt router (ADR-0012): `intake → route`. Its `router` node needs a
+/// catalog of opted-in graphs, supplied by the frontend that runs it.
+pub const ROUTER_TOML: &str = include_str!("../../../graphs/routing.router.toml");
+
 /// Every built-in spec shipped with this build, `(id, toml)`.
-pub fn builtin_specs() -> [(&'static str, &'static str); 4] {
+pub fn builtin_specs() -> [(&'static str, &'static str); 5] {
     [
+        ("graffy.builtin.router", ROUTER_TOML),
         ("graffy.builtin.conversation", DEFAULT_CONVERSATION_TOML),
         ("graffy.builtin.conversation.gated", GATED_CONVERSATION_TOML),
         (
@@ -215,6 +220,113 @@ mod tests {
             rejected,
             "journal must carry the rejection with attribution"
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn router_executor(candidates: Vec<graffy_core::route::RouteCandidate>) -> Executor {
+        let mut registry = graffy_core::exec::NodeRegistry::with_defaults();
+        registry.register(
+            "router",
+            std::sync::Arc::new(graffy_core::route::RouterNode {
+                candidates,
+                floor: graffy_core::route::RouteCandidate {
+                    graph_id: "graffy.builtin.conversation".into(),
+                    name: "Default Conversation".into(),
+                    route_on: Vec::new(),
+                },
+            }),
+        );
+        Executor {
+            registry,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn router_graph_journals_its_choice_and_is_not_a_conversation_turn() {
+        use wire::run_event::Event;
+        let spec = GraphSpec::from_toml_str(super::ROUTER_TOML).unwrap();
+        // Candidates are exactly the built-ins that opted in.
+        let candidates: Vec<_> = super::builtin_specs()
+            .iter()
+            .map(|(_, toml)| GraphSpec::from_toml_str(toml).unwrap().graph)
+            .filter(|meta| !meta.route_on.is_empty())
+            .map(|meta| graffy_core::route::RouteCandidate {
+                graph_id: meta.id,
+                name: meta.name,
+                route_on: meta.route_on,
+            })
+            .collect();
+        assert!(
+            candidates
+                .iter()
+                .all(|c| c.graph_id != "graffy.builtin.router"
+                    && !c.graph_id.starts_with("graffy.builtin.conversation")),
+            "the router and the conversation floors stay explicit-only"
+        );
+        let path = temp_path("router");
+        let outcome = router_executor(candidates)
+            .run(
+                &spec,
+                super::ROUTER_TOML,
+                RunInput {
+                    prompt: "What are the pros and cons of renting?".into(),
+                    run_kind: wire::RunKind::Routing as i32,
+                    ..Default::default()
+                },
+                &path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.status, wire::RunStatus::Succeeded);
+        assert!(
+            outcome.final_text.is_none(),
+            "a routing run answers nothing"
+        );
+        let events = JournalReader::read_all(&path).unwrap();
+        let decision = graffy_core::route::decision_from(&events).unwrap();
+        assert_eq!(
+            decision.chosen_graph_id,
+            "graffy.builtin.reasoning.decision-framework"
+        );
+        assert_eq!(decision.matched_phrase, "pros and cons");
+        assert!(!decision.fallback);
+        assert!(decision.reason.contains("pros and cons"));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event, Some(Event::BoundaryEvent(_)))),
+            "no boundary contribution is recorded for a routing run"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn router_graph_fails_loudly_without_a_catalog() {
+        // The default registry has no `router` kind: nothing pretends to route.
+        let spec = GraphSpec::from_toml_str(super::ROUTER_TOML).unwrap();
+        let path = temp_path("router-bare");
+        let result = Executor::default()
+            .run(
+                &spec,
+                super::ROUTER_TOML,
+                RunInput {
+                    prompt: "pros and cons".into(),
+                    run_kind: wire::RunKind::Routing as i32,
+                    ..Default::default()
+                },
+                &path,
+                &OfflineEcho,
+                &AutoApprove,
+            )
+            .await;
+        let failed = match result {
+            Err(_) => true,
+            Ok(outcome) => outcome.status != wire::RunStatus::Succeeded,
+        };
+        assert!(failed);
         std::fs::remove_file(&path).ok();
     }
 }

@@ -122,6 +122,11 @@ enum Command {
         /// approvals, run details) instead of the plain line-based chat.
         #[arg(long)]
         tui: bool,
+        /// Route each message onto a registered graph that opted in with
+        /// `route_on` trigger phrases (ADR-0012); anything else runs as plain
+        /// conversation. Start a message with `/chat ` to skip routing.
+        #[arg(long, conflicts_with = "graph")]
+        route: bool,
     },
     /// Replay a run journal: fold the event stream into a summary.
     Replay {
@@ -275,7 +280,8 @@ async fn main() -> anyhow::Result<()> {
             retry,
             session,
             tui,
-        } => chat(graph, offline, retry, session, tui).await,
+            route,
+        } => chat(graph, offline, retry, session, tui, route).await,
         Command::Replay {
             journal,
             tui,
@@ -504,6 +510,12 @@ fn cmd_metrics(dir: Option<PathBuf>, json: bool) -> anyhow::Result<()> {
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "n/a".to_owned())
     );
+    if aggregate.routing_runs > 0 {
+        println!(
+            "routing : {} routing run(s) — counted here only, never as execution runs",
+            aggregate.routing_runs
+        );
+    }
     if aggregate.rating_observations > 0 {
         println!(
             "  ratings      : {} observation journal(s) — excluded from every execution aggregate",
@@ -645,6 +657,7 @@ async fn run_graph(
         approvals: Arc::new(CliApprovalHandler),
         cancellation: cancellation.clone(),
         event_tap: None,
+        routed_by: None,
     };
     if tui {
         let outcome = graffy_tui::run_live(&spec, move |tap, approvals, cancellation| async move {
@@ -822,6 +835,7 @@ async fn chat(
     retry: Option<String>,
     mut session: Option<String>,
     tui: bool,
+    route: bool,
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use std::io::{IsTerminal, Write};
@@ -836,8 +850,10 @@ async fn chat(
     // using — silently swapping graphs could drop that graph's approval gate.
     let graph_arg = match (&graph, &resumed) {
         (Some(pinned), _) => pinned.clone(),
-        (None, Some((_, session_graph, _))) => session_graph.clone(),
-        (None, None) => "graffy.builtin.conversation".to_owned(),
+        // With --route the floor is always plain conversation; the router
+        // decides, message by message, whether another graph runs instead.
+        (None, Some((_, session_graph, _))) if !route => session_graph.clone(),
+        _ => "graffy.builtin.conversation".to_owned(),
     };
     let spec_text = resolve_spec(&graph_arg).await.with_context(|| {
         format!(
@@ -851,7 +867,7 @@ async fn chat(
         if *unconfirmed {
             eprintln!("warning: {UNCONFIRMED_HISTORY}");
         }
-        if session_graph != &spec.graph.id {
+        if session_graph != &spec.graph.id && !route {
             eprintln!(
                 "note: this session last ran on graph '{session_graph}'; continuing on '{}' because --graph pins it",
                 spec.graph.id
@@ -866,24 +882,18 @@ async fn chat(
     }
     let invoker = build_invoker(offline);
     let tools = connect_tools(&spec).await?;
+    let graphs = Arc::new(ChatGraphs::load(spec.clone(), spec_text.clone(), tools, route).await?);
+    // Repeat how this chat was started so the printed command resumes it alike.
+    let resume_flags = match (&graph, route) {
+        (Some(pinned), _) => format!(" --graph \"{pinned}\""),
+        (None, true) => " --route".to_owned(),
+        (None, false) => String::new(),
+    };
     if tui {
         let history = resumed.map(|r| r.0).unwrap_or_default();
-        let session = chat_tui(
-            spec,
-            spec_text,
-            max_attempts,
-            invoker,
-            tools,
-            history,
-            session,
-        )
-        .await?;
+        let session = chat_tui(graphs, max_attempts, invoker, history, session).await?;
         if let Some(id) = session {
-            let pin = graph
-                .as_ref()
-                .map(|g| format!(" --graph \"{g}\""))
-                .unwrap_or_default();
-            println!("resume this chat: graffy chat --tui --session {id}{pin}");
+            println!("resume this chat: graffy chat --tui --session {id}{resume_flags}");
         }
         return Ok(());
     }
@@ -892,6 +902,9 @@ async fn chat(
          /correct <text> sends a correction · /quit or end-of-input leaves · Ctrl-C stops the current turn",
         spec.graph.name, spec.graph.version
     );
+    if route {
+        println!("{}", graphs.describe());
+    }
 
     // Ctrl-C cancels the turn in flight; with no turn running it leaves chat.
     let active: Arc<std::sync::Mutex<Option<graffy_core::control::Cancellation>>> =
@@ -940,6 +953,11 @@ async fn chat(
         if text == "/quit" {
             break;
         }
+        // `/chat <text>` is the human's override: plain conversation, no routing.
+        let (text, plain) = match text.strip_prefix("/chat ") {
+            Some(rest) => (rest.trim(), true),
+            None => (text, false),
+        };
         let (prompt, correction) = match text.strip_prefix("/correct ") {
             Some(rest) => (rest.trim(), true),
             None => (text, false),
@@ -961,6 +979,22 @@ async fn chat(
         };
         let cancellation = graffy_core::control::Cancellation::default();
         *active.lock().unwrap() = Some(cancellation.clone());
+        let chosen = match graphs
+            .pick(prompt, plain, session.clone(), &invoker, &cancellation)
+            .await
+        {
+            Ok(chosen) => chosen,
+            Err(err) => {
+                *active.lock().unwrap() = None;
+                unreleased += 1;
+                eprintln!("turn not started: routing failed: {err}");
+                continue;
+            }
+        };
+        if let Some(note) = &chosen.note {
+            println!("routing : {note}");
+        }
+        let (spec, spec_text) = (&chosen.spec, &chosen.spec_text);
         let mut runner = turn::TurnRunner::new(turn::Turn {
             spec: spec.clone(),
             spec_text: spec_text.clone(),
@@ -973,12 +1007,13 @@ async fn chat(
             runs_dir: runs_dir(),
             started: std::time::Instant::now(),
             invoker: invoker.clone(),
-            tools: tools.clone(),
+            tools: chosen.tools.clone(),
             approvals: approvals.clone(),
             cancellation,
             event_tap: Some(tap.clone()),
+            routed_by: chosen.routed_by.clone(),
         });
-        let result = drive_turn(&spec, &spec_text, &mut runner, true, &mut progress).await;
+        let result = drive_turn(spec, spec_text, &mut runner, true, &mut progress).await;
         *active.lock().unwrap() = None;
         if let Some(id) = runner.session_id() {
             session = Some(id.to_owned());
@@ -990,13 +1025,7 @@ async fn chat(
     }
     signal_task.abort();
     if let Some(id) = &session {
-        // Repeat an explicit pin so the printed command resumes the same graph
-        // even when it is an unregistered file.
-        let pin = graph
-            .as_ref()
-            .map(|g| format!(" --graph \"{g}\""))
-            .unwrap_or_default();
-        println!("\nresume this chat: graffy chat --session {id}{pin}");
+        println!("\nresume this chat: graffy chat --session {id}{resume_flags}");
     }
     if unreleased > 0 {
         anyhow::bail!("{unreleased} turn(s) released no answer");
@@ -1112,6 +1141,8 @@ async fn load_session_runs(
         if m.session_id != session
             || m.graph_id == "graffy.mcw.rating"
             || m.run_kind == wire::RunKind::RatingObservation as i32
+            // A routing run is about a prompt; it is never a conversation turn.
+            || m.run_kind == wire::RunKind::Routing as i32
         {
             continue;
         }
@@ -1653,6 +1684,7 @@ async fn cmd_rate(
         attempt_index: 1,
         retry_of_run_id: String::new(),
         run_kind: wire::RunKind::RatingObservation as i32,
+        routed_by_run_id: String::new(),
     }))?;
     for record in &seg_records {
         writer.append(JEvent::Segmentation(record.clone()))?;
@@ -2325,28 +2357,213 @@ impl ApprovalHandler for CliApprovalHandler {
     }
 }
 
+/// The graph one chat turn runs on, and how it was chosen.
+#[derive(Clone)]
+struct TurnGraph {
+    spec: GraphSpec,
+    spec_text: String,
+    tools: Option<Arc<dyn ToolInvoker>>,
+    /// The routing run that chose it; `None` for a pin or a `/chat` override.
+    routed_by: Option<String>,
+    /// The recorded reason, shown to the human as one plain line.
+    note: Option<String>,
+}
+
+/// Graph selection for chat: a fixed floor graph, plus — with `--route` — the
+/// journaled prompt router over graphs that opted in (ADR-0012).
+struct ChatGraphs {
+    floor: TurnGraph,
+    router: Option<PromptRouter>,
+}
+
+struct PromptRouter {
+    spec: GraphSpec,
+    spec_text: String,
+    candidates: Vec<graffy_core::route::RouteCandidate>,
+    /// Opted-in specs by graph id.
+    specs: std::collections::HashMap<String, (GraphSpec, String)>,
+    /// Tool planes are connected on first use and reused for the chat.
+    tools: tokio::sync::Mutex<std::collections::HashMap<String, Option<Arc<dyn ToolInvoker>>>>,
+}
+
+impl ChatGraphs {
+    async fn load(
+        spec: GraphSpec,
+        spec_text: String,
+        tools: Option<Arc<dyn ToolInvoker>>,
+        route: bool,
+    ) -> anyhow::Result<Self> {
+        let floor = TurnGraph {
+            spec,
+            spec_text,
+            tools,
+            routed_by: None,
+            note: None,
+        };
+        if !route {
+            return Ok(Self {
+                floor,
+                router: None,
+            });
+        }
+        let spec_text = resolve_spec("graffy.builtin.router").await?;
+        let spec = GraphSpec::from_toml_str(&spec_text)?;
+        graffy_core::graph::CompiledGraph::compile(&spec)?;
+        let mut candidates = Vec::new();
+        let mut specs = std::collections::HashMap::new();
+        for record in open_store().await?.list_graphs().await? {
+            // The registry only holds lawful graphs; parse to read the opt-in.
+            let candidate = GraphSpec::from_toml_str(&record.spec_toml)?;
+            if candidate.graph.route_on.is_empty() {
+                continue; // explicit-only
+            }
+            candidates.push(graffy_core::route::RouteCandidate {
+                graph_id: candidate.graph.id.clone(),
+                name: candidate.graph.name.clone(),
+                route_on: candidate.graph.route_on.clone(),
+            });
+            specs.insert(candidate.graph.id.clone(), (candidate, record.spec_toml));
+        }
+        Ok(Self {
+            floor,
+            router: Some(PromptRouter {
+                spec,
+                spec_text,
+                candidates,
+                specs,
+                tools: Default::default(),
+            }),
+        })
+    }
+
+    /// One plain line naming what the router can choose from.
+    fn describe(&self) -> String {
+        match &self.router {
+            Some(router) if router.candidates.is_empty() => {
+                "routing : on, but no registered graph declares route_on phrases — every message runs as plain conversation".into()
+            }
+            Some(router) => format!(
+                "routing : on — may choose {}. Start a message with /chat to use plain conversation instead.",
+                router
+                    .candidates
+                    .iter()
+                    .map(|c| format!("'{}'", c.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => String::new(),
+        }
+    }
+
+    /// Choose the graph for one message. With routing on (and no `/chat`
+    /// override) this executes the router graph as its own journaled run.
+    async fn pick(
+        &self,
+        prompt: &str,
+        plain: bool,
+        session: Option<String>,
+        invoker: &Arc<dyn ModelInvoker>,
+        cancellation: &graffy_core::control::Cancellation,
+    ) -> anyhow::Result<TurnGraph> {
+        let Some(router) = self.router.as_ref().filter(|_| !plain) else {
+            return Ok(self.floor.clone());
+        };
+        let mut registry = graffy_core::exec::NodeRegistry::with_defaults();
+        registry.register(
+            "router",
+            Arc::new(graffy_core::route::RouterNode {
+                candidates: router.candidates.clone(),
+                floor: graffy_core::route::RouteCandidate {
+                    graph_id: self.floor.spec.graph.id.clone(),
+                    name: self.floor.spec.graph.name.clone(),
+                    route_on: Vec::new(),
+                },
+            }),
+        );
+        let executor = graffy_core::exec::Executor {
+            registry,
+            cancellation: cancellation.clone(),
+            ..Default::default()
+        };
+        let outcome = executor
+            .run(
+                &router.spec,
+                &router.spec_text,
+                graffy_core::exec::RunInput {
+                    prompt: prompt.to_owned(),
+                    // Before the first turn there is no session yet; that
+                    // routing run carries its own id and is linked from the
+                    // target run's manifest instead.
+                    session_id: session,
+                    run_kind: wire::RunKind::Routing as i32,
+                    ..Default::default()
+                },
+                &runs_dir().join(format!("{}.journal", ulid_like_stamp())),
+                invoker.as_ref(),
+                &graffy_core::exec::AutoApprove,
+            )
+            .await?;
+        if let Err(err) = index_run(&router.spec, &router.spec_text, &outcome).await {
+            tracing::warn!("indexing the routing run failed ({err}); journal remains canonical");
+        }
+        if outcome.status != wire::RunStatus::Succeeded {
+            anyhow::bail!("routing run ended {:?}", outcome.status);
+        }
+        let decision =
+            graffy_core::route::decision_from(&JournalReader::read_all(&outcome.journal_path)?)
+                .ok_or_else(|| anyhow::anyhow!("routing run recorded no decision"))?;
+        let mut chosen = if decision.fallback {
+            self.floor.clone()
+        } else {
+            let (spec, spec_text) = router
+                .specs
+                .get(&decision.chosen_graph_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("router chose unknown graph '{}'", decision.chosen_graph_id)
+                })?
+                .clone();
+            let mut planes = router.tools.lock().await;
+            let tools = match planes.get(&spec.graph.id) {
+                Some(plane) => plane.clone(),
+                None => {
+                    let plane = connect_tools(&spec).await?;
+                    planes.insert(spec.graph.id.clone(), plane.clone());
+                    plane
+                }
+            };
+            TurnGraph {
+                spec,
+                spec_text,
+                tools,
+                routed_by: None,
+                note: None,
+            }
+        };
+        chosen.routed_by = Some(outcome.run_id);
+        chosen.note = Some(decision.reason);
+        Ok(chosen)
+    }
+}
+
 /// `graffy chat --tui`: the Ratatui conversation view over the same turn
 /// runner. Returns the session to resume, if any turn ran.
 async fn chat_tui(
-    spec: GraphSpec,
-    spec_text: String,
+    graphs: Arc<ChatGraphs>,
     max_attempts: u32,
     invoker: Arc<dyn ModelInvoker>,
-    tools: Option<Arc<dyn ToolInvoker>>,
     history: Vec<(String, String)>,
     session: Option<String>,
 ) -> anyhow::Result<Option<String>> {
     let current = Arc::new(std::sync::Mutex::new(session.clone()));
     let for_turns = current.clone();
     let for_reset = current.clone();
-    let view_spec = spec.clone();
+    let view_spec = graphs.floor.spec.clone();
     graffy_tui::run_chat(
         &view_spec,
         history,
         session,
         move |turn: graffy_tui::ChatTurn, tap, approvals, cancellation| {
-            let (spec, spec_text) = (spec.clone(), spec_text.clone());
-            let (invoker, tools, current) = (invoker.clone(), tools.clone(), for_turns.clone());
+            let (invoker, graphs, current) = (invoker.clone(), graphs.clone(), for_turns.clone());
             async move {
                 let mut reply = graffy_tui::ChatReply::default();
                 let session = current.lock().unwrap().clone();
@@ -2366,6 +2583,20 @@ async fn chat_tui(
                     }
                     None => Vec::new(),
                 };
+                let chosen = graphs
+                    .pick(
+                        &turn.prompt,
+                        turn.plain,
+                        session.clone(),
+                        &invoker,
+                        &cancellation,
+                    )
+                    .await
+                    .map_err(|err| anyhow::anyhow!("routing failed: {err}"))?;
+                reply.notices.extend(chosen.note.iter().map(|n| {
+                    format!("routing: {n} — start a message with /chat for plain conversation")
+                }));
+                let (spec, spec_text) = (chosen.spec.clone(), chosen.spec_text.clone());
                 let mut runner = turn::TurnRunner::new(turn::Turn {
                     spec: spec.clone(),
                     spec_text: spec_text.clone(),
@@ -2378,10 +2609,11 @@ async fn chat_tui(
                     runs_dir: runs_dir(),
                     started: std::time::Instant::now(),
                     invoker,
-                    tools,
+                    tools: chosen.tools.clone(),
                     approvals,
                     cancellation,
                     event_tap: Some(tap),
+                    routed_by: chosen.routed_by.clone(),
                 });
                 // Same attempt loop as plain chat; notes instead of prints.
                 let released = loop {

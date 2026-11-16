@@ -22,6 +22,8 @@ pub struct ChatTurn {
     pub prompt: String,
     /// Explicit human declaration (`/correct`), never inferred from wording.
     pub correction: bool,
+    /// `/chat`: the human asked for plain conversation, skipping any routing.
+    pub plain: bool,
 }
 
 /// What a finished turn hands back to the view.
@@ -57,6 +59,7 @@ enum Action {
     Submit {
         prompt: String,
         correction: bool,
+        plain: bool,
     },
     NewSession,
     /// Stop the turn in flight.
@@ -168,6 +171,10 @@ impl ChatState {
             );
             return Action::NewSession;
         }
+        let (text, plain) = match text.strip_prefix("/chat ") {
+            Some(rest) => (rest.trim().to_owned(), true),
+            None => (text, false),
+        };
         let (prompt, correction) = match text.strip_prefix("/correct ") {
             Some(rest) => (rest.trim().to_owned(), true),
             None => (text, false),
@@ -181,7 +188,11 @@ impl ChatState {
             },
             &prompt,
         );
-        Action::Submit { prompt, correction }
+        Action::Submit {
+            prompt,
+            correction,
+            plain,
+        }
     }
 
     /// The transcript as pre-wrapped lines. Every speaker has a glyph AND a
@@ -442,11 +453,19 @@ where
                         static_loop(&mut terminal, &app, &mut ui)?;
                     }
                 }
-                Action::Submit { prompt, correction } => {
+                Action::Submit {
+                    prompt,
+                    correction,
+                    plain,
+                } => {
                     let (tap_tx, tap) = tokio::sync::mpsc::unbounded_channel();
                     let cancellation = Cancellation::default();
                     let task = tokio::spawn(start(
-                        ChatTurn { prompt, correction },
+                        ChatTurn {
+                            prompt,
+                            correction,
+                            plain,
+                        },
                         tap_tx,
                         approvals.clone(),
                         cancellation.clone(),
@@ -593,7 +612,8 @@ mod tests {
             chat.on_key(key(KeyCode::Enter)),
             Action::Submit {
                 prompt: "quit? yes, really".into(),
-                correction: false
+                correction: false,
+                plain: false
             }
         );
         assert!(chat.input.is_empty());
@@ -718,7 +738,18 @@ mod tests {
             chat.on_key(key(KeyCode::Enter)),
             Action::Submit {
                 prompt: "use ZEBRA".into(),
-                correction: true
+                correction: true,
+                plain: false
+            }
+        );
+        // `/chat` is the routing override, and combines with a correction.
+        type_text(&mut chat, "/chat /correct pros and cons");
+        assert_eq!(
+            chat.on_key(key(KeyCode::Enter)),
+            Action::Submit {
+                prompt: "pros and cons".into(),
+                correction: true,
+                plain: true
             }
         );
         type_text(&mut chat, "/new");

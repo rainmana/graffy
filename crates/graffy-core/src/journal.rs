@@ -204,6 +204,7 @@ pub fn event_kind(frame: &wire::RunEvent) -> &'static str {
         Some(Event::McwSnapshot(_)) => "mcw_snapshot",
         Some(Event::BoundaryEvent(_)) => "boundary_event",
         Some(Event::Segmentation(_)) => "segmentation",
+        Some(Event::GraphRouting(_)) => "graph_routing",
         None => "empty",
     }
 }
