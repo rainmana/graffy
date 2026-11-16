@@ -42,13 +42,12 @@ Each entry says what was seen, what we suspect, and what would confirm it.
 - **Status**: known ceiling, recorded at `graffy chat` introduction; not
   reproduced in a test.
 
-## `graffy chat --tui`: composer is append-only
+## `graffy chat --tui`: not yet looked at on every terminal
 
-- **What**: the message box supports typing, Backspace and paste, but has no
-  cursor movement (Left/Right/Home/End) or word deletion. Fixing a typo early
-  in a long draft means deleting back to it.
-- **Fix when it bites**: track a cursor index in `ChatState` (`ui/chat.rs`).
-- **Also unverified**: the view was driven in a Linux pseudo-terminal and has
-  render tests at normal and tiny sizes; it has not been looked at by a human
-  on macOS Terminal, Windows Terminal or WSL. Treat layout and color as
-  unreviewed until @rainmana has run it.
+- **What**: the view was driven in a Linux pseudo-terminal, has render tests at
+  normal and tiny sizes, and has been used by @rainmana on macOS. It has not
+  been checked on Windows Terminal or WSL. Treat layout and color there as
+  unreviewed.
+- **Composer**: the message box has a cursor (`←`/`→`, `Home`/`End`, `Delete`,
+  `Ctrl-W`). `↑`/`↓` scroll the transcript rather than moving between lines of
+  a multi-line draft, and there is no selection or undo.

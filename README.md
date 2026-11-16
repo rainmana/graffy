@@ -395,7 +395,7 @@ Only complete MCP tool responses containing text or structured JSON are handled 
 | `Ctrl-A` / `Ctrl-R` | Approve / reject when an approval is showing |
 | `Ctrl-C` | Stop the running turn; when idle, quit |
 
-Approvals in chat take Ctrl chords on purpose: text typed as a prompt appears can never decide a gate. The delivery receipt is recorded only after the frame showing the answer has been drawn. Recorded text is stripped of control characters before it is rendered. Mouse capture provides wheel scrolling; selecting text then needs your terminal's modifier key (Option on macOS terminals, Shift on most others). The message box is append-only for now: type, Backspace, and paste, with no cursor movement inside the draft.
+Approvals in chat take Ctrl chords on purpose: text typed as a prompt appears can never decide a gate. The delivery receipt is recorded only after the frame showing the answer has been drawn. Recorded text is stripped of control characters before it is rendered. Mouse capture provides wheel scrolling; selecting text then needs your terminal's modifier key (Option on macOS terminals, Shift on most others). In the message box, `←` / `→`, `Home` / `End`, `Backspace`, `Delete`, and `Ctrl-W` (delete the previous word) edit the draft anywhere; paste lands at the cursor.
 
 ### Run and replay views
 
@@ -486,7 +486,7 @@ The project is intentionally pre-alpha. The main implementation boundaries are:
 - Multi-persona `agent.conversation` execution and benchmark/evaluation runners are scaffolded, not active node kinds.
 - Token counts are accounted after calls; a remaining output-token request is not a hard bound on total input plus output. USD accounting remains unavailable until pricing is configured.
 - Prompt routing is opt-in per chat (`--route`) and only for `graffy chat`; `graffy run` always runs the graph you name. Building a graph on the fly when none fits, and embedding-based matching, are not implemented.
-- The chat TUI is deliberately plain: an append-only message box, no click-to-select, and with `--retry` its run details show only the latest attempt. It has been used on macOS; Windows Terminal and WSL are unchecked.
+- The chat TUI is deliberately plain: no click-to-select, no multi-line cursor movement with `↑` / `↓` (those scroll the transcript), and with `--retry` its run details show only the latest attempt. It has been used on macOS; Windows Terminal and WSL are unchecked.
 - MCP is stdio-only, and its stored argument tail is space-separated; complex shell quoting is not preserved as a shell would preserve it.
 - Existing `--journal` paths are rejected. Legacy responses without delivery receipts remain inspectable but are excluded from confirmed conversation history.
 - The TUI may show overlapping text under some Windows Terminal/WSL resize and glyph-width combinations; see [Known Issues](docs/KNOWN-ISSUES.md).
