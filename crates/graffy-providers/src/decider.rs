@@ -42,38 +42,49 @@ impl HttpDecider {
         model: Option<String>,
         key: Option<String>,
     ) -> Result<Self, DeciderError> {
-        let base = base_url.trim().trim_end_matches('/');
-        let (secure, rest) = match (base.strip_prefix("https://"), base.strip_prefix("http://")) {
-            (Some(rest), _) => (true, rest),
-            (_, Some(rest)) => (false, rest),
-            _ => {
-                return Err(DeciderError(format!(
-                    "decider URL '{base_url}' must start with https:// or http://"
-                )));
+        // Parse, never split by hand: `http://localhost:pw@example.com` has
+        // the host example.com, and must not pass for this machine.
+        let invalid = |why: &str| DeciderError(format!("decider URL '{base_url}' {why}"));
+        let mut url = reqwest::Url::parse(base_url.trim())
+            .map_err(|err| invalid(&format!("is not a valid URL: {err}")))?;
+        let host = url
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| invalid("has no host"))?
+            .to_owned();
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(invalid(
+                "must not contain a username or password; use GRAFFY_DECIDER_API_KEY",
+            ));
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(invalid("must not contain a query or fragment"));
+        }
+        let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]");
+        match url.scheme() {
+            "https" => {}
+            // Prompts (and a key) must not cross a network in clear text.
+            "http" if local => {}
+            "http" => {
+                return Err(invalid(
+                    "uses plain http:// for a non-local host; use https://",
+                ));
             }
+            _ => return Err(invalid("must start with https:// or http://")),
+        }
+        let endpoint = match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host,
         };
-        let endpoint = rest.split('/').next().unwrap_or_default().to_owned();
-        if endpoint.is_empty() {
-            return Err(DeciderError(format!(
-                "decider URL '{base_url}' has no host"
-            )));
-        }
-        let host = endpoint
-            .rsplit_once(':')
-            .map_or(endpoint.as_str(), |(host, _)| host);
-        // Prompts (and a key) must not cross a network in clear text.
-        if !secure && !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
-            return Err(DeciderError(format!(
-                "decider URL '{base_url}' uses plain http:// for a non-local host; use https://"
-            )));
-        }
+        let path = format!("{}/v1/systemone", url.path().trim_end_matches('/'));
+        url.set_path(&path);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|err| DeciderError(format!("cannot build HTTP client: {err}")))?;
         Ok(Self {
             client,
-            url: format!("{base}/v1/systemone"),
+            url: url.into(),
             endpoint,
             model,
             key,
@@ -310,5 +321,28 @@ mod tests {
                 .endpoint(),
             "api.example.com"
         );
+        // The host is whatever the URL parser says it is — credentials in the
+        // authority cannot disguise a remote host as this machine.
+        for disguised in [
+            "http://localhost:password@example.com",
+            "http://127.0.0.1@example.com",
+            "http://localhost@example.com:8000",
+            "https://user:secret@api.example.com",
+            "http://localhost.example.com",
+            "https://api.example.com/?key=1",
+            "ftp://localhost",
+        ] {
+            assert!(
+                HttpDecider::new(disguised, None, None).is_err(),
+                "{disguised}"
+            );
+        }
+        let prefixed = HttpDecider::new("https://api.example.com:8443/base/", None, None).unwrap();
+        assert_eq!(prefixed.endpoint(), "api.example.com:8443");
+        assert_eq!(
+            prefixed.url,
+            "https://api.example.com:8443/base/v1/systemone"
+        );
+        assert!(HttpDecider::new("http://[::1]:8000", None, None).is_ok());
     }
 }

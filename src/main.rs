@@ -2650,6 +2650,13 @@ async fn chat_tui(
         &view_spec,
         move |graph_id| for_view.spec_for(graph_id),
         history,
+        // Routing disclosure (which endpoint receives messages, how to opt a
+        // message out) is on screen before the first message can be sent.
+        graphs
+            .describe()
+            .lines()
+            .map(|line| line.trim_start_matches("routing : ").to_owned())
+            .collect(),
         session,
         move |turn: graffy_tui::ChatTurn, tap, approvals, cancellation| {
             let (invoker, graphs, current) = (invoker.clone(), graphs.clone(), for_turns.clone());

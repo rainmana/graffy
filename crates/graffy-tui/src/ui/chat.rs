@@ -90,6 +90,22 @@ fn clean(text: &str) -> String {
 }
 
 impl ChatState {
+    /// The state a chat opens with: the restored transcript, then anything
+    /// the human must be told before their first message is sent.
+    fn opening(history: &[(String, String)], notices: &[String]) -> Self {
+        let mut chat = Self::default();
+        for (actor, content) in history {
+            match actor.as_str() {
+                "human" => chat.push(Who::Human, "you", content),
+                _ => chat.push(Who::Ai, "graffy · earlier response", content),
+            }
+        }
+        for notice in notices {
+            chat.push(Who::Note, "note", notice);
+        }
+        chat
+    }
+
     fn push(&mut self, who: Who, label: &str, text: &str) {
         self.entries.push(Entry {
             who,
@@ -297,12 +313,15 @@ struct ActiveTurn {
 /// * `spec_for` — the spec of a graph id, so run details describe the graph
 ///   that actually executed (with routing, that differs turn by turn).
 /// * `history` — the recorded visible transcript of a resumed session.
+/// * `notices` — shown before any message can be sent (for example, where a
+///   decision-model router sends messages).
 /// * `start` — executes one turn; must go through the shared turn runner.
 /// * `new_session` — the user asked for a fresh conversation (`/new`).
 pub async fn run_chat<S, Fut, N>(
     spec: &GraphSpec,
     spec_for: impl Fn(&str) -> Option<GraphSpec>,
     history: Vec<(String, String)>,
+    notices: Vec<String>,
     mut session: Option<String>,
     mut start: S,
     mut new_session: N,
@@ -314,13 +333,7 @@ where
 {
     let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
     let approvals: Arc<dyn ApprovalHandler> = Arc::new(TuiApprovalHandler { tx: approval_tx });
-    let mut chat = ChatState::default();
-    for (actor, content) in &history {
-        match actor.as_str() {
-            "human" => chat.push(Who::Human, "you", content),
-            _ => chat.push(Who::Ai, "graffy · earlier response", content),
-        }
-    }
+    let mut chat = ChatState::opening(&history, &notices);
     let mut app = AppState::default();
     let mut ui = UiState::new(View::Inspect);
     let mut active: Option<ActiveTurn> = None;
@@ -763,6 +776,25 @@ mod tests {
         chat.scroll(7);
         chat.push(Who::Note, "note", "hi");
         assert_eq!(chat.scroll_back, 0);
+    }
+
+    #[test]
+    fn opening_notices_are_on_screen_before_anything_can_be_sent() {
+        let chat = ChatState::opening(
+            &[("human".into(), "earlier".into())],
+            &["every routed message is SENT to decider.example".into()],
+        );
+        assert!(chat.input.is_empty() && !chat.busy);
+        let last = chat.entries.last().unwrap();
+        assert_eq!(last.who, Who::Note);
+        assert!(last.text.contains("SENT to decider.example"));
+        let screen: String = chat
+            .lines(80)
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("! note") && screen.contains("SENT to decider.example"));
     }
 
     #[test]
