@@ -132,6 +132,17 @@ Goal: a stranger can watch a prompt refuse to run raw.
   rule and the "Current boundaries" list apply to marketing copy too; record the
   generator choice in an ADR and any theme or asset inflow in `NOTICE.md`;
   reproducible `--offline` terminal demos explain the tool faster than prose.
+- **`/retry` slash command in the chat TUI** (owner request, 2026-11-17): today
+  the retry loop is set once, at launch (`graffy chat --tui --retry <N|auto>`),
+  and `graffy run --tui` refuses `--retry` outright (`run_graph` in
+  `src/main.rs`). Add `/retry <N|auto|off>` beside `/new`, `/quit` and `/chat `
+  in `ChatState::submit` (`crates/graffy-tui/src/ui/chat.rs`) to change the
+  attempt cap for later turns. Breadcrumbs: reuse `max_attempts_from` so the
+  `auto` = 3 bound stays the single source; refuse it while `busy` the way a
+  draft is refused, never mid-turn; echo the new cap as a `Who::Note` line so
+  the change is visible and journal-adjacent; the run-details pane currently
+  shows only the latest attempt (README "Current boundaries"), so pair this
+  with an attempt switcher there.
 - **Theme engine**: first-class TUI themes — Catppuccin, Dracula, and Nord out of the box,
   plus user-defined theme files (a `themes/*.toml` format in the same durable spirit as graph
   specs); optional Unicode / Nerd-Font icon sets with a plain-ASCII fallback that is always
