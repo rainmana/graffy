@@ -148,8 +148,9 @@ jobs:
 
   publish:
     name: publish release
-    # Only a tag publishes; a manual run is a dry run.
-    if: github.ref_type == 'tag'
+    # Only a pushed tag publishes. A manual run is a dry run even when it is
+    # started on a tag ref.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [checks, build]
     permissions:
       contents: write
