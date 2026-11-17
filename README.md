@@ -73,7 +73,7 @@ Tagged releases contain one `graffy` binary plus the license, notice, and README
 
 Download the archive for your platform from [GitHub Releases](https://github.com/rainmana/graffy/releases), extract it, and place `graffy` on your `PATH`.
 
-macOS releases are currently unsigned and not notarized. Intel macOS and Windows binaries are not currently produced.
+macOS releases up to `v0.1.0-alpha.7` are unsigned and not notarized. Signing and notarization are wired into the release workflow and take effect once the Apple credentials are configured ([docs/release-signing.md](docs/release-signing.md)). Intel macOS and Windows binaries are not currently produced.
 
 ### Build or install from source
 

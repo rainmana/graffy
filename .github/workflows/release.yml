@@ -1,12 +1,20 @@
 # Single-binary distribution (ADR-0002): Linux x86_64 + aarch64 as fully
 # static musl binaries (no glibc floor — runs on any distro), macOS Apple
 # Silicon. Tag a version matching Cargo.toml to build and attach binaries.
+#
+# The macOS binary is signed with a Developer ID certificate and notarized
+# when the Apple secrets are configured (docs/release-signing.md). Without
+# them it is built unsigned and the run says so in a warning.
+#
+# "Run workflow" (workflow_dispatch) is a dry run: it builds, signs and
+# notarizes, and uploads the archives as run artifacts, but publishes nothing.
 
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -48,11 +56,74 @@ jobs:
         shell: bash
         run: |
           binary="./target/${{ matrix.target }}/release/graffy"
-          test "$("$binary" --version)" = "graffy ${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            test "$("$binary" --version)" = "graffy ${GITHUB_REF_NAME#v}"
+          else
+            "$binary" --version  # dry run: no tag to compare against
+          fi
           export GRAFFY_HOME="$(mktemp -d)"
           "$binary" init
           "$binary" run graffy.builtin.conversation --prompt "release smoke test" --offline
           "$binary" metrics --json
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          binary="./target/${{ matrix.target }}/release/graffy"
+          if [ -z "${CERT_P12_BASE64:-}" ]; then
+            echo "::warning title=macOS binary is UNSIGNED::Apple signing secrets are not set, so this macOS binary is not signed or notarized. See docs/release-signing.md."
+            exit 0
+          fi
+          # Signing was asked for: from here every missing piece is an error.
+          : "${CERT_PASSWORD:?APPLE_DEVELOPER_ID_P12_PASSWORD is not set}"
+          : "${SIGN_IDENTITY:?APPLE_SIGNING_IDENTITY is not set}"
+          : "${NOTARY_KEY_BASE64:?APPLE_NOTARY_KEY_P8_BASE64 is not set}"
+          : "${NOTARY_KEY_ID:?APPLE_NOTARY_KEY_ID is not set}"
+          : "${NOTARY_ISSUER_ID:?APPLE_NOTARY_ISSUER_ID is not set}"
+
+          keychain="$RUNNER_TEMP/graffy-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          cleanup() {
+            security delete-keychain "$keychain" 2>/dev/null || true
+            rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/graffy-notarize.zip"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+
+          # Hardened runtime + secure timestamp: both required for notarization.
+          codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$binary"
+          codesign --verify --strict --verbose=2 "$binary"
+
+          # A bare executable is notarized inside a zip. A ticket cannot be
+          # stapled to a bare executable, so Gatekeeper checks it online.
+          printf '%s' "$NOTARY_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k --keepParent "$binary" "$RUNNER_TEMP/graffy-notarize.zip"
+          result="$(xcrun notarytool submit "$RUNNER_TEMP/graffy-notarize.zip" \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --output-format json)"
+          echo "$result"
+          status="$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')"
+          if [ "$status" != "Accepted" ]; then
+            echo "::error::Notarization ended with status '$status', not 'Accepted'."
+            exit 1
+          fi
+          # The signed binary must still run.
+          "$binary" --version
       - name: Package
         run: |
           mkdir -p dist
@@ -60,7 +131,8 @@ jobs:
           cp LICENSE NOTICE.md README.md dist/
           python3 - <<'PY'
           import os, pathlib, tarfile
-          archive = f"graffy-{os.environ['GITHUB_REF_NAME']}-${{ matrix.target }}.tar.gz"
+          ref = os.environ['GITHUB_REF_NAME'].replace('/', '-')  # a dry run's ref is a branch
+          archive = f"graffy-{ref}-${{ matrix.target }}.tar.gz"
           def normalize(info):
               info.uid = info.gid = 0
               info.uname = info.gname = ""
@@ -76,6 +148,8 @@ jobs:
 
   publish:
     name: publish release
+    # Only a tag publishes; a manual run is a dry run.
+    if: github.ref_type == 'tag'
     needs: [checks, build]
     permissions:
       contents: write
