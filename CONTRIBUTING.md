@@ -18,6 +18,11 @@ Pre-alpha — expect churn. That said:
   and `cargo test --workspace` must pass (CI enforces all three).
 - Protobufs compile via pure-Rust `protox` — do not introduce a system `protoc` dependency.
 - Commit style: imperative subject, body explains *why*.
+- **PRs wait for Codex.** Codex auto-reviews every PR. Green CI is necessary,
+  not sufficient: wait for its comments/approval, reply to each as the agent
+  (sign the reply so it reads as the agent, not @rainmana), then either fix and
+  commit or explain why the finding is not applicable, and resolve the thread.
+  Merge only once Codex has no open threads and has approved. See AGENT.md.
 
 ## License
 
