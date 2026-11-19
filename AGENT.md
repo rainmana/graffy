@@ -164,8 +164,10 @@ critical path.
   When in doubt, use a fresh tag name and bump the version to match.
 - Releases: Linux = musl static (no glibc floor), macOS = Apple Silicon
   only (Intel dropped deliberately). A post-build `--version` smoke step is
-  mandatory. Apple signing/notarization is tabled (he has a paid Apple
-  Developer membership) — see ROADMAP.
+  mandatory. macOS signing/notarization is wired into `release.yml` behind six
+  Apple secrets (`docs/release-signing.md`); until a run has had them it is
+  untested. "Run workflow" on Release is a publish-free dry run. Homebrew tap
+  (issue #28) comes after signing works.
 
 ## Where the project is (alpha.7, 2026-11-16)
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Release pipeline — macOS signing and notarization (issue #12):** the release
+  workflow signs the macOS binary with a Developer ID certificate (hardened
+  runtime, secure timestamp) and submits it for notarization when the six Apple
+  secrets are configured; `docs/release-signing.md` is the owner's setup guide.
+  Without the secrets the binary is built unsigned and the run warns about it.
+  A manual "Run workflow" is now a dry run that builds, signs and uploads
+  artifacts without publishing. **Not yet exercised:** no run has had the
+  secrets, so the signing step is untested.
 - **Chat TUI composer:** the message box has a cursor. `←` / `→`, `Home` / `End`,
   `Delete`, and `Ctrl-W` edit the draft anywhere, and paste lands at the cursor.
   Movement, deletion and wrapping work on grapheme clusters, so a joined emoji or
