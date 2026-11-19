@@ -101,6 +101,53 @@ Cargo workspace, single `graffy` binary, single tokio process (ADR-0001/2).
    rejection releases nothing). An end-to-end offline run of the default
    conversation graph is the acceptance floor.
 
+## Reviewing and merging PRs (Codex auto-review)
+
+A PR is not done when CI is green. **Codex reviews every PR automatically.**
+
+- **Open the PR, then wait.** Do not merge on green CI alone. Wait for Codex's
+  review comments and an explicit approval (or no open findings).
+- **Reply to Codex yourself.** Reply to every review comment as the agent, and
+  make it unmistakable that it is not @rainmana even though the PR sits on his
+  account. Sign each reply, e.g. a final line:
+  `— Claude (agent), on @rainmana's behalf`.
+- **Resolve every thread, one of two ways:**
+  1. **Fix it:** make the change, commit it, say which commit addresses it,
+     re-run the gates (`cargo fmt --all --check`,
+     `cargo clippy --workspace --all-targets -- -D warnings`,
+     `cargo test --workspace`), and push.
+  2. **Argue it:** if the finding does not apply, explain the code/spec/ADR
+     reason to Codex and resolve the thread. "Won't fix" without a reason is not
+     enough.
+- **Merge only after** Codex has no open threads and has given a thumbs up.
+- Prefer added commits over rewrites while review is open, so Codex keeps its
+  context.
+
+## What to work on next (priority order)
+
+Canonical detail lives in GitHub Issues. The order below is the tie-breaker when
+two issues compete; it keeps parallel agents from all chasing features while the
+core live path is still rough. Distribution is deliberately last.
+
+- **P0 — make the live path trustworthy.** #30 context policy for long
+  conversations; #32 live-provider end-to-end smoke; #35 abandoned-approval
+  stdin swallow; #34 quiet plain-CLI logging.
+- **P1 — make it do real work.** #31 give `research` a real behavior (grounding /
+  MCP evidence reachable from conversation); #33 token streaming / visible
+  progress.
+- **P2 — robustness and honesty.** #36 store WAL/busy_timeout; #38 decider
+  timeout; #37 refresh ARCHITECTURE.md; #3 C4 Lessons + `graffy lessons`.
+- **P3 — distribution (tabled by the owner 2026-11-19; not blockers).** #28
+  Homebrew tap, then #12 / PR #29 signing, then #25 docs site.
+- **P4 — the long tail the owner keeps adding.** #17 routing follow-ons; #7/#8;
+  #9/#11; #10; #1–#6; #13/#14.
+
+**Definition of "solid enough to hand to people":** a stranger can install, bind
+a model, hold a long multi-turn conversation that uses a tool, cancel and resume
+without a panic, and see honest failures — with the gates green and Codex review
+clean. Signed/notarized binaries and a Homebrew tap are explicitly not on that
+critical path.
+
 ## Working with Alec (@rainmana)
 
 - Self-taught, information-theory day job. **Teach as you work**: what, why,

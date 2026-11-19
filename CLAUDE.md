@@ -20,6 +20,10 @@ The five rules that prevent the most damage, restated:
 5. Decisions → `docs/adr/`; deferred ideas → ROADMAP "Tabled" with design
    breadcrumbs; observations → `docs/KNOWN-ISSUES.md`; license inflows
    (Apache-2.0-compatible only) → `NOTICE.md`.
+6. **PRs wait for Codex auto-review.** Green CI is not "done". Reply to every
+   Codex comment as the agent (sign it — it is not @rainmana), fix and commit or
+   justify why the finding does not apply, resolve each thread, and merge only
+   once Codex is clear. Work in the AGENT.md "What to work on next" order.
 
 Owner: W. Alec Akin (@rainmana). Teach as you work, credit his ideas, give
 him exact PowerShell-safe commands (no `&&`) for anything touching tags,
