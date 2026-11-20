@@ -12,6 +12,15 @@
   middle of a command's output. `graffy run` used those `INFO` lines as its
   progress display; it now prints one `· step: <node>` line per node on stderr,
   read from the journal, the same way `graffy chat` does.
+- **Live-provider smoke test (issue #32):** `tests/live_provider.rs` adds two
+  opt-in (`#[ignore]`) tests that run one turn of the default conversation through
+  the real binary against a real hosted provider or a real Ollama server, using the
+  ordinary `GRAFFY_MODEL_*` bindings and provider key, and then check the journal.
+  An unconfigured live test fails with instructions rather than passing. The
+  required offline gates gain hermetic tests for the same path: an unreachable
+  provider fails loudly and releases nothing, and a loopback stub exercises the
+  live acceptance check. See `docs/live-smoke.md`. The live tests themselves have
+  not yet been run against a real provider.
 - **Chat TUI composer:** the message box has a cursor. `←` / `→`, `Home` / `End`,
   `Delete`, and `Ctrl-W` edit the draft anywhere, and paste lands at the cursor.
   Movement, deletion and wrapping work on grapheme clusters, so a joined emoji or

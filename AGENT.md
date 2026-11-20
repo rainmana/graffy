@@ -230,9 +230,12 @@ cargo run -- metrics --json                  # fold journals into research metri
 cargo run -- doctor                          # bindings, store, credentials presence
 GRAFFY_DATA_DIR=<dir>                        # override store location (tests/demos)
 cargo test -p graffy-mcp -- --ignored        # real npx MCP server round-trip
+cargo test --test live_provider live_hosted -- --ignored --nocapture   # real hosted provider, one turn (docs/live-smoke.md)
+cargo test --test live_provider live_ollama -- --ignored --nocapture   # real Ollama, one turn
 ```
 
 Live runs: set `GRAFFY_MODEL_FAST/_BALANCED/_FRONTIER=provider:model` plus
 the provider's key env (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `OPENROUTER_API_KEY`, `VENICE_API_KEY`; Ollama needs none, honors
-`OLLAMA_API_BASE_URL`).
+`OLLAMA_API_BASE_URL`). The live smoke tests read exactly this environment and
+fail with instructions when it is missing — they never fall back to the echo.

@@ -509,6 +509,15 @@ CI runs formatting and Clippy on Linux, then builds and tests the workspace on L
 $ cargo test -p graffy-mcp -- --ignored
 ```
 
+The required gates never contact a model. An opt-in smoke test drives one real provider through the real executor; bind `GRAFFY_MODEL_BALANCED` and `GRAFFY_MODEL_FRONTIER` to `provider:model`, set that provider's key, and run the test for its family by name:
+
+```console
+$ cargo test --test live_provider live_hosted -- --ignored --nocapture   # anthropic | openai | openrouter | venice
+$ cargo test --test live_provider live_ollama -- --ignored --nocapture
+```
+
+See [the live smoke guide](docs/live-smoke.md) for the environment, what a pass means, and how to read a failure.
+
 Project guidance:
 
 - [AGENT.md](AGENT.md) — invariant, architecture seams, development discipline, and current project state
