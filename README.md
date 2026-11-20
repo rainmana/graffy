@@ -245,7 +245,7 @@ $ graffy run graphs/reasoning.decision-framework.toml --prompt "Choose a journal
 
 ## Command reference
 
-Global option: `-v` enables debug logs and `-vv` enables trace logs. `RUST_LOG` can override the default tracing filter.
+Global option: `-v` enables debug logs and `-vv` enables trace logs. Without it, plain commands log warnings and errors only, and a TUI logs nothing. `RUST_LOG` overrides either default (for example `RUST_LOG=info`). Log lines are written to stderr.
 
 | Command | What it does | Important options |
 | --- | --- | --- |

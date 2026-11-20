@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Quiet plain commands (issue #34):** plain commands no longer print `INFO` log
+  lines by default — `graffy doctor` showed `registered/updated built-in graphs`
+  and `graffy mcp add` showed the MCP client's `serve_inner` lines. The default
+  filter for plain commands is now warnings and errors only, matching the rule
+  already used for chat; a TUI still logs nothing. `-v` (debug), `-vv` (trace) or
+  `RUST_LOG` (for example `RUST_LOG=info`) bring the lines back. Log lines are now
+  written to stderr instead of stdout, so a warning can no longer land in the
+  middle of a command's output. `graffy run` used those `INFO` lines as its
+  progress display; it now prints one `· step: <node>` line per node on stderr,
+  read from the journal, the same way `graffy chat` does.
 - **Chat TUI composer:** the message box has a cursor. `←` / `→`, `Home` / `End`,
   `Delete`, and `Ctrl-W` edit the draft anywhere, and paste lands at the cursor.
   Movement, deletion and wrapping work on grapheme clusters, so a joined emoji or
