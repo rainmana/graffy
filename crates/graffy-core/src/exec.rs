@@ -808,13 +808,12 @@ impl NodeBehavior for ModelNode {
             })
             .map(|iu| {
                 consume(iu);
-                format!(
-                    "{}: {}",
+                crate::context::history_line(
                     iu.attributes
                         .get("actor")
                         .map(String::as_str)
                         .unwrap_or("?"),
-                    iu.payload_text
+                    &iu.payload_text,
                 )
             })
             .collect();
@@ -842,12 +841,8 @@ impl NodeBehavior for ModelNode {
             goal
         } else {
             let mut assembled = goal;
-            if !history.is_empty() {
-                assembled = format!(
-                    "Conversation so far (visible boundary exchanges):\n{}\n\nCurrent request:\n{assembled}",
-                    history.join("\n")
-                );
-            }
+            // Built in one place so the context policy measures what is sent.
+            assembled = crate::context::assemble(&assembled, &history);
             if !context_sections.is_empty() {
                 assembled = format!(
                     "{assembled}\n\nContext from prior steps:\n{}",

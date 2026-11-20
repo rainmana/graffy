@@ -17,3 +17,4 @@ Locked decisions, in order. An ADR is superseded only by a newer ADR that names 
 | [0011](0011-release-and-boundary-receipts.md) | Successful-run release, output receipts, exact-payload approvals, cancellation and calibration boundary | Accepted |
 | [0012](0012-prompt-to-graph-routing.md) | Prompt-to-graph routing: router as its own run, opt-in trigger phrases, optional decision-model router (Jev / Strands Decider) | Accepted; phrase and decision-model routers implemented |
 | [0013](0013-apache-2-relicensing.md) | Relicense graffy to Apache-2.0; permissive-only inflow rules | Accepted |
+| [0014](0014-context-policy-stopgap.md) | Context policy for continued sessions: measure, then a disclosed bounded selection or a loud stop; never a silent trim | Implemented as a stop-gap; compaction graph to supersede |

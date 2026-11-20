@@ -3,7 +3,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn graffy() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_graffy"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_graffy"));
+    command.env_remove("GRAFFY_CONTEXT_MAX_BYTES");
+    command
 }
 
 fn run_prompt(home: &std::path::Path, prompt: &str, session: Option<&str>) -> String {

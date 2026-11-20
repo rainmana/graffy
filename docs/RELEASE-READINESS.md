@@ -219,6 +219,12 @@ Long conversations need an explicit context policy: initially warn and stop befo
 context overflow or disclose a bounded selection. Do not silently drop earlier
 constraints. IU-aware compaction can follow as a graph with its own evidence.
 
+*Implemented after this review (issue #30, ADR-0014):* the stop-gap. A continued
+turn is measured in bytes before it starts; over the limit it carries the opening
+human turn plus the most recent turns that fit, disclosed to the human, the model
+and the journal, or it stops before any model call. Compaction is still open, and
+so is pinning explicit corrections.
+
 ## Backlog and release hygiene
 
 All 17 GitHub issues were open at review time. Some describe older requirements:

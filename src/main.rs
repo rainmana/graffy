@@ -632,6 +632,7 @@ async fn run_graph(
     // Validate before starting any provider or MCP transport.
     graffy_core::graph::CompiledGraph::compile(&spec)?;
     let max_attempts = max_attempts_from(retry.as_deref())?;
+    let context_max_bytes = context_max_bytes()?;
     if tui && (max_attempts > 1 || session.is_some() || correction) {
         anyhow::bail!(
             "--retry, --session and --correction require plain CLI mode; `graffy chat --tui` is the interactive view"
@@ -645,10 +646,19 @@ async fn run_graph(
             "journal already exists; choose a new path (existing journals are never overwritten)"
         );
     }
-    let prior_boundary = match &session {
-        Some(id) => hydrate_history(id).await?,
-        None => Vec::new(),
+    // The context policy runs before any provider or MCP transport starts.
+    let history = match &session {
+        Some(id) => turn::TurnHistory::select(
+            &spec,
+            &prompt,
+            hydrate_history(id).await?,
+            context_max_bytes,
+        )?,
+        None => turn::TurnHistory::none(),
     };
+    if let Some(notice) = history.notice() {
+        eprintln!("warning: {notice}");
+    }
     let invoker = build_invoker(offline);
     let turn_started = std::time::Instant::now();
     let tool_plane = connect_tools(&spec).await?;
@@ -660,7 +670,7 @@ async fn run_graph(
         prompt,
         correction,
         session,
-        prior_boundary,
+        history,
         max_attempts,
         journal,
         runs_dir: runs_dir(),
@@ -720,6 +730,26 @@ fn max_attempts_from(retry: Option<&str>) -> anyhow::Result<u32> {
     retries
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("--retry is too large"))
+}
+
+/// The human's own limit on a continued turn's input, in UTF-8 bytes
+/// (ADR-0014). Unset means the graph's token budget decides. graffy does not
+/// know any model's context window, so it never guesses a value here.
+fn context_max_bytes() -> anyhow::Result<Option<u64>> {
+    const KEY: &str = "GRAFFY_CONTEXT_MAX_BYTES";
+    match std::env::var(KEY) {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(err) => anyhow::bail!("{KEY} is unreadable: {err}"),
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|bytes| *bytes > 0)
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow::anyhow!("{KEY} must be a positive whole number of bytes, got '{value}'")
+            }),
+    }
 }
 
 /// Visible boundary history of an existing session, for model context.
@@ -877,6 +907,8 @@ async fn chat(
     let spec = GraphSpec::from_toml_str(&spec_text)?;
     graffy_core::graph::CompiledGraph::compile(&spec)?;
     let max_attempts = max_attempts_from(retry.as_deref())?;
+    // A bad limit stops the chat before it starts, not at the first long turn.
+    let context_max_bytes = context_max_bytes()?;
     if let Some((history, session_graph, unconfirmed)) = &resumed {
         if *unconfirmed {
             eprintln!("warning: {UNCONFIRMED_HISTORY}");
@@ -914,7 +946,15 @@ async fn chat(
     };
     if tui {
         let history = resumed.map(|r| r.0).unwrap_or_default();
-        let session = chat_tui(graphs, max_attempts, invoker, history, session).await?;
+        let session = chat_tui(
+            graphs,
+            max_attempts,
+            context_max_bytes,
+            invoker,
+            history,
+            session,
+        )
+        .await?;
         if let Some(id) = session {
             println!("resume this chat: graffy chat --tui --session {id}{resume_flags}");
         }
@@ -1018,13 +1058,26 @@ async fn chat(
             println!("routing : {note}");
         }
         let (spec, spec_text) = (&chosen.spec, &chosen.spec_text);
+        let history =
+            match turn::TurnHistory::select(spec, prompt, prior_boundary, context_max_bytes) {
+                Ok(history) => history,
+                Err(err) => {
+                    *active.lock().unwrap() = None;
+                    unreleased += 1;
+                    eprintln!("turn not started: {err}");
+                    continue;
+                }
+            };
+        if let Some(notice) = history.notice() {
+            eprintln!("warning: {notice}");
+        }
         let mut runner = turn::TurnRunner::new(turn::Turn {
             spec: spec.clone(),
             spec_text: spec_text.clone(),
             prompt: prompt.to_owned(),
             correction,
             session: session.clone(),
-            prior_boundary,
+            history,
             max_attempts,
             journal: None,
             runs_dir: runs_dir(),
@@ -2334,6 +2387,15 @@ async fn doctor() -> anyhow::Result<()> {
         let set = std::env::var(key).is_ok_and(|v| !v.is_empty());
         println!("  {key:<20} {}", if set { "set" } else { "-" });
     }
+    // The context policy's limit (ADR-0014), read exactly as a turn reads it.
+    println!("\ncontext limit for continued sessions (GRAFFY_CONTEXT_MAX_BYTES):");
+    match context_max_bytes() {
+        Ok(Some(bytes)) => println!("  {bytes} bytes, set by you — it overrides every graph"),
+        Ok(None) => println!(
+            "  not set — each graph's token budget decides; a graph without one is not bounded"
+        ),
+        Err(err) => println!("  not usable: {err}"),
+    }
     // The decision-model router (`chat --route=decider`). Checked exactly as
     // chat would check it, without contacting the endpoint.
     println!("\ndecision-model router (chat --route=decider; nothing is contacted here):");
@@ -2660,6 +2722,7 @@ fn decider_from_env() -> anyhow::Result<graffy_core::route::DeciderRouting> {
 async fn chat_tui(
     graphs: Arc<ChatGraphs>,
     max_attempts: u32,
+    context_max_bytes: Option<u64>,
     invoker: Arc<dyn ModelInvoker>,
     history: Vec<(String, String)>,
     session: Option<String>,
@@ -2716,13 +2779,26 @@ async fn chat_tui(
                     format!("routing: {n} — start a message with /chat for plain conversation")
                 }));
                 let (spec, spec_text) = (chosen.spec.clone(), chosen.spec_text.clone());
+                let history = match turn::TurnHistory::select(
+                    &spec,
+                    &turn.prompt,
+                    prior_boundary,
+                    context_max_bytes,
+                ) {
+                    Ok(history) => history,
+                    Err(err) => {
+                        reply.notices.push(format!("turn not started: {err}"));
+                        return Ok(reply);
+                    }
+                };
+                reply.notices.extend(history.notice().map(str::to_owned));
                 let mut runner = turn::TurnRunner::new(turn::Turn {
                     spec: spec.clone(),
                     spec_text: spec_text.clone(),
                     prompt: turn.prompt,
                     correction: turn.correction,
                     session,
-                    prior_boundary,
+                    history,
                     max_attempts,
                     journal: None,
                     runs_dir: runs_dir(),

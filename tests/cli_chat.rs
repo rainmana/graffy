@@ -34,6 +34,8 @@ impl Sandbox {
             .env_remove("GRAFFY_DECIDER_MODEL")
             .env_remove("GRAFFY_DECIDER_API_KEY")
             .env_remove("GRAFFY_ROUTER_MIN_CONFIDENCE")
+            // So is the context limit: unset, the graph's budget decides.
+            .env_remove("GRAFFY_CONTEXT_MAX_BYTES")
             .envs(env.iter().copied())
             .arg("chat")
             .arg("--offline")
@@ -428,4 +430,99 @@ fn decider_routing_refuses_to_start_on_guessed_or_missing_configuration() {
             .iter()
             .all(|(m, _)| m.run_kind == wire::RunKind::Routing as i32)
     );
+}
+
+/// The text a draft node was sent, recovered from the offline echo's answer.
+fn draft_inputs(events: &[wire::RunEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Some(Event::IuRecorded(iu))
+                if iu.attributes.get("role").map(String::as_str) == Some("draft") =>
+            {
+                iu.payload_text
+                    .strip_prefix("[offline echo — no real model was consulted]\n")
+                    .map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_long_chat_sends_a_bounded_disclosed_history_and_keeps_the_opening_constraint() {
+    const LIMIT: usize = 2000;
+    let h = Sandbox::new();
+    // The offline echo repeats its whole input, so every answer is longer
+    // than the last: without a policy this chat's input grows without bound.
+    let mut input = String::from("RULE-OPAL: answer in metric units only\n");
+    for n in 0..9 {
+        input.push_str(&format!("filler question {n}\n"));
+    }
+    let o = h.chat_env(&[], &input, &[("GRAFFY_CONTEXT_MAX_BYTES", "2000")]);
+    assert!(o.status.success(), "{}\n{}", out(&o), err(&o));
+    let runs = h.runs();
+    assert_eq!(runs.len(), 10, "every turn still runs and releases");
+    assert!(runs.iter().all(|(_, events)| delivered(events) == 1));
+
+    let mut bounded_turns = 0;
+    for (_, events) in &runs {
+        let inputs = draft_inputs(events);
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            inputs[0].len() <= LIMIT,
+            "a draft was sent {} bytes; the limit is {LIMIT}",
+            inputs[0].len()
+        );
+        assert!(
+            inputs[0].contains("RULE-OPAL: answer in metric units only"),
+            "the opening constraint was trimmed away"
+        );
+        // A trimmed turn says so to the model, and the journal keeps that line.
+        let disclosed = events.iter().any(|e| {
+            matches!(&e.event, Some(Event::IuRecorded(iu))
+                if iu.attributes.get("actor").map(String::as_str) == Some("graffy")
+                    && iu.payload_text.starts_with("[context policy]"))
+        });
+        assert_eq!(disclosed, inputs[0].contains("graffy: [context policy]"));
+        bounded_turns += usize::from(disclosed);
+    }
+    assert!(bounded_turns > 0, "the chat never grew past the limit");
+    // The human is told once per trimmed turn, where warnings go.
+    assert_eq!(
+        err(&o)
+            .matches("warning: context policy: the model was sent")
+            .count(),
+        bounded_turns
+    );
+    assert!(err(&o).contains("set by GRAFFY_CONTEXT_MAX_BYTES"));
+}
+
+#[test]
+fn a_turn_too_large_for_the_limit_stops_loudly_and_a_bad_limit_never_starts_a_chat() {
+    let h = Sandbox::new();
+    let o = h.chat_env(
+        &[],
+        "RULE-OPAL: answer in metric units only\nand then?\n",
+        &[("GRAFFY_CONTEXT_MAX_BYTES", "60")],
+    );
+    assert!(!o.status.success(), "a refused turn is not a success");
+    assert!(
+        err(&o).contains("turn not started: context policy: turn not sent"),
+        "{}",
+        err(&o)
+    );
+    assert!(err(&o).contains("No model was called"));
+    assert_eq!(h.runs().len(), 1, "the refused turn ran nothing");
+
+    for bad in ["0", "lots", "-5"] {
+        let o = h.chat_env(&[], "hello\n", &[("GRAFFY_CONTEXT_MAX_BYTES", bad)]);
+        assert!(!o.status.success());
+        assert!(
+            err(&o).contains("GRAFFY_CONTEXT_MAX_BYTES must be a positive whole number"),
+            "{}",
+            err(&o)
+        );
+    }
+    assert_eq!(h.runs().len(), 1, "a bad limit sends nothing");
 }

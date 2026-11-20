@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Context policy for long conversations (issue #30, ADR-0014):** a continued
+  turn no longer carries an unbounded history. Before the turn starts, graffy
+  measures the request plus the session's visible history in UTF-8 bytes. Over
+  the limit, it sends the opening human turn and as many of the most recent turns
+  as fit, and discloses the omission to you (`warning: context policy: …`, or a
+  notice line in the chat TUI), to the model (a `[context policy]` line where the
+  turns are missing) and in the journal. If the request and the opening turn
+  cannot fit, the turn is refused before any model call. The limit is
+  `GRAFFY_CONTEXT_MAX_BYTES` when set; otherwise the graph's token budget divided
+  by its model-calling nodes (100,000 bytes for the built-in conversation graph).
+  `graffy doctor` reports the setting. This is a stop-gap: bytes rather than
+  tokens, no summarizing, and mid-conversation constraints can be omitted (with
+  the disclosure) once a session outgrows the limit. **Behaviour change:** a
+  session whose history exceeded the derived limit but still fit a real
+  tokenizer's count is now trimmed and says so; set `GRAFFY_CONTEXT_MAX_BYTES` to
+  choose the limit yourself.
 - **Chat TUI composer:** the message box has a cursor. `←` / `→`, `Home` / `End`,
   `Delete`, and `Ctrl-W` edit the draft anywhere, and paste lands at the cursor.
   Movement, deletion and wrapping work on grapheme clusters, so a joined emoji or

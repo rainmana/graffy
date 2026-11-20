@@ -22,7 +22,9 @@ impl Sandbox {
     }
     fn cmd(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_graffy"));
-        c.env("GRAFFY_HOME", &self.0).env_remove("GRAFFY_DATA_DIR");
+        c.env("GRAFFY_HOME", &self.0)
+            .env_remove("GRAFFY_DATA_DIR")
+            .env_remove("GRAFFY_CONTEXT_MAX_BYTES");
         c
     }
     fn run(&self, args: &[&str], input: &str) -> Output {
@@ -333,6 +335,54 @@ fn custom_journal_continuation_hydrates_and_explicit_correction_opens_episode() 
         .find(|p| p.to_string_lossy().contains("-rating"))
         .unwrap();
     assert!(events(&rating).iter().any(|e|matches!(&e.event,Some(Event::HrdmSampled(s)) if s.repair_cost.is_none() && s.unratable_reasons.contains("right-censored"))));
+}
+#[test]
+fn run_session_applies_the_context_policy_and_a_bad_limit_runs_nothing() {
+    let h = Sandbox::new();
+    let run = |limit: &str, extra: &[&str]| {
+        h.cmd()
+            .env("GRAFFY_CONTEXT_MAX_BYTES", limit)
+            .args(["run", "graffy.builtin.conversation", "--offline"])
+            .args(extra)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let stderr = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+
+    // A bad limit is rejected even when this run would carry no history.
+    let bad = run("lots", &["--prompt", "hi"]);
+    assert!(!bad.status.success());
+    assert!(stderr(&bad).contains("GRAFFY_CONTEXT_MAX_BYTES must be a positive whole number"));
+    assert!(h.journals().is_empty());
+
+    let first = run("100000", &["--prompt", "RULE-OPAL: metric units only"]);
+    let ses = session(&first);
+    assert!(!stderr(&first).contains("context policy"));
+
+    // Too small for the request, the opening turn and the notice: refused.
+    let refused = run("60", &["--prompt", "and then?", "--session", &ses]);
+    assert!(!refused.status.success());
+    assert!(stderr(&refused).contains("context policy: turn not sent"));
+    assert_eq!(h.journals().len(), 1, "a refused turn runs nothing");
+
+    // Room for the opening turn but not for a long later exchange: that
+    // exchange is left out, and the human and the model are both told.
+    let filler = "filler ".repeat(100);
+    let long = run("100000", &["--prompt", &filler, "--session", &ses]);
+    assert!(long.status.success(), "{}", stderr(&long));
+    let trimmed = run("700", &["--prompt", "and then?", "--session", &ses]);
+    assert!(trimmed.status.success(), "{}", stderr(&trimmed));
+    assert!(
+        stderr(&trimmed).contains(
+            "warning: context policy: the model was sent 1 of 4 earlier turns (only the opening human turn); 3 turn(s)"
+        ),
+        "{}",
+        stderr(&trimmed)
+    );
+    assert!(text(&trimmed).contains("human: RULE-OPAL: metric units only"));
+    assert!(text(&trimmed).contains("graffy: [context policy] 3 earlier turn(s)"));
+    assert!(!text(&trimmed).contains("filler filler"));
 }
 #[test]
 fn retry_overflow_and_correction_without_session_are_rejected() {

@@ -221,6 +221,24 @@ count or a guarantee against provider overhead. Actual provider-reported usage
 still controls aggregate accounting. If the input reserve leaves no output
 allowance, the run stops as budget-exhausted before contacting the provider.
 
+**Long conversations ([ADR-0014](docs/adr/0014-context-policy-stopgap.md)).** A
+continued turn (`chat`, or `run --session`) carries the session's visible history
+to the model. Before the turn starts, graffy measures the request plus that
+history in UTF-8 bytes. If it is over the limit, graffy sends the opening human
+turn and as many of the most recent turns as fit, and says so three ways: a
+`context policy:` warning to you, a `[context policy]` line to the model exactly
+where turns are missing, and the same line in the journal. If even the request
+and the opening turn cannot fit, the turn is not sent and no model is called.
+Nothing is summarized and nothing is dropped silently.
+
+The limit is `GRAFFY_CONTEXT_MAX_BYTES` when you set it (a positive whole number;
+choose it for the model you bound, because graffy does not know any model's
+context window). Otherwise it is the graph's token budget divided by its
+model-calling nodes, counting one token per byte like the reserve above: 100,000
+bytes for the built-in conversation graph. That derived limit is deliberately
+conservative and is not a guarantee against running out of budget. A graph with
+no token budget has no limit unless you set one.
+
 > [!NOTE]
 > Provider token counts are recorded when the provider returns them. USD pricing tables are not implemented yet, so live model calls deliberately record `cost_usd = 0.0`; USD budget and cost output should not yet be treated as real spend accounting.
 
@@ -485,6 +503,7 @@ The project is intentionally pre-alpha. The main implementation boundaries are:
 - The database is a graph/run/journal/MCP registry today. Episodic FTS memory, vector retrieval, temporal knowledge graphs, and layered recall are not implemented yet.
 - Multi-persona `agent.conversation` execution and benchmark/evaluation runners are scaffolded, not active node kinds.
 - Token counts are accounted after calls; a remaining output-token request is not a hard bound on total input plus output. USD accounting remains unavailable until pricing is configured.
+- The context policy for long conversations is a stop-gap: it measures bytes, not tokens; it keeps the opening human turn and the most recent turns, so a constraint stated mid-conversation (including a `/correct`) can be left out, with a disclosure, once the session outgrows the limit; one limit applies to every tier; and nothing is compacted or summarized.
 - Prompt routing is opt-in per chat (`--route`) and only for `graffy chat`; `graffy run` always runs the graph you name. Building a graph on the fly when none fits, and embedding-based matching, are not implemented.
 - The chat TUI is deliberately plain: no click-to-select, no multi-line cursor movement with `↑` / `↓` (those scroll the transcript), and with `--retry` its run details show only the latest attempt. It has been used on macOS; Windows Terminal and WSL are unchecked.
 - MCP is stdio-only, and its stored argument tail is space-separated; complex shell quoting is not preserved as a shell would preserve it.

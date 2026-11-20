@@ -203,6 +203,11 @@ critical path.
   pseudo-terminal and by render tests, not yet by a human on real terminals.
   Desktop/web is tabled indefinitely. The optional graph inspection view is not
   a prerequisite for chat.
+- Context policy (ADR-0014, stop-gap for #30): `turn::TurnHistory::select` is the
+  only way history reaches a turn. Over the byte limit it keeps the opening human
+  turn plus the newest turns and discloses the gap to the human, the model and
+  the journal; if that cannot fit it refuses the turn. Never trim history
+  anywhere else, and never without the disclosure. Compaction is still open.
 - After chat: native Windows x64 CI/release builds are a low-priority portability
   follow-up requested by the owner; see ROADMAP. Windows is not yet a supported
   release target, and this work does not gate alpha.6 or chat.

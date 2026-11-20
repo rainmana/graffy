@@ -132,6 +132,19 @@ Goal: a stranger can watch a prompt refuse to run raw.
   rule and the "Current boundaries" list apply to marketing copy too; record the
   generator choice in an ADR and any theme or asset inflow in `NOTICE.md`;
   reproducible `--offline` terminal demos explain the tool faster than prose.
+- **Context policy follow-ons — after the stop-gap** (issue #30, ADR-0014,
+  2026-11-19): the stop-gap keeps the opening human turn and the newest turns and
+  discloses the rest as omitted. Still to do, in this order: (1) **pin explicit
+  corrections** — `boundary::hydration_from` returns only actor and text, so the
+  selection cannot see `BoundaryRole::Correction`; carry the role through
+  `RunInput.prior_boundary` and pin those turns the way the opening turn is
+  pinned; (2) a **per-tier limit** (`GRAFFY_CONTEXT_MAX_BYTES_<TIER>`, mirroring
+  `GRAFFY_MAX_OUTPUT_TOKENS_<TIER>`), since an escalated tier can be bound to a
+  smaller model; (3) the **IU-aware compaction graph** of Phase 3, which replaces
+  the selection and must preserve IUs and falsification conditions or raise
+  `Overcompression` with receipts. A real tokenizer count needs a per-provider
+  tokenizer and an inflow review first; until then the measure stays bytes. The
+  disclosure rule (human, model and journal are all told) outlives the stop-gap.
 - **Theme engine**: first-class TUI themes — Catppuccin, Dracula, and Nord out of the box,
   plus user-defined theme files (a `themes/*.toml` format in the same durable spirit as graph
   specs); optional Unicode / Nerd-Font icon sets with a plain-ASCII fallback that is always
