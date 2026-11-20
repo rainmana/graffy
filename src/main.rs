@@ -78,7 +78,7 @@ enum Command {
         #[arg(long)]
         prompt: String,
         /// Watch the run live in the TUI (node states, journal feed,
-        /// step inspector) instead of plain logs.
+        /// step inspector) instead of plain step lines.
         #[arg(long)]
         tui: bool,
         /// Run against the deterministic offline echo invoker (no model,
@@ -246,13 +246,15 @@ async fn main() -> anyhow::Result<()> {
     let default_filter = match cli.verbose {
         // Log lines written over a live TUI corrupt it; the journal is the record.
         0 if tui_active => "off",
-        // Chat prints its own step progress; raw log lines would bury the conversation.
-        0 if matches!(&cli.command, Some(Command::Chat { .. })) => "warn",
-        0 => "info",
+        // Plain commands print their own report (and `run`/`chat` their own step
+        // progress); INFO lines would bury it. Warnings and errors stay visible.
+        0 => "warn",
         1 => "debug",
         _ => "trace",
     };
     tracing_subscriber::fmt()
+        // Diagnostics go to stderr so stdout stays the command's own output.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
@@ -697,8 +699,14 @@ async fn run_graph(
             cancel_on_signal.cancel();
         }
     });
-    let mut runner = turn::TurnRunner::new(turn);
-    let result = drive_turn(&spec, &spec_text, &mut runner, false, &mut None).await;
+    // Step progress comes from the journal tap, as in chat — not from log lines,
+    // which are quiet by default.
+    let (tap, progress) = tokio::sync::mpsc::unbounded_channel();
+    let mut runner = turn::TurnRunner::new(turn::Turn {
+        event_tap: Some(tap),
+        ..turn
+    });
+    let result = drive_turn(&spec, &spec_text, &mut runner, false, &mut Some(progress)).await;
     signal_task.abort();
     result?;
     println!(
