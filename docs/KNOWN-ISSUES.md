@@ -27,20 +27,24 @@ Each entry says what was seen, what we suspect, and what would confirm it.
   cause — retest on WSL before closing issue #15; the resize/glyph hypotheses
   above stay open until then.
 
-## `graffy chat`: an abandoned approval prompt can swallow the next line
+## Plain terminal: a line typed ahead can answer an approval gate
 
-- **What**: the plain-terminal approval handler reads stdin from a detached
-  thread. If a turn ends (deadline, Ctrl-C) while an approval prompt is still
-  waiting, that thread is still blocked on stdin and will consume the next line
-  typed — which the user meant as a chat message. The line is discarded; it is
-  never treated as an approval and releases nothing.
-- **Reach**: interactive (terminal) chat only, on graphs with an approval gate,
-  and only when the turn ends before the human answers. Piped chat never reads
-  approvals from stdin at all (the gate is abandoned). `graffy run` is unaffected (the process exits).
-- **Fix when it bites**: one owned stdin reader for the process, handing lines
-  to whichever of chat/approval is waiting.
-- **Status**: known ceiling, recorded at `graffy chat` introduction; not
-  reproduced in a test.
+- **Seen**: 2026-11-19, in a macOS pseudo-terminal, on `main` and on the branch
+  that fixed issue #35. Typing `first`, Enter, `y`, Enter before the gate's
+  question appeared approved the gate on graph `conversation.gated`: the answer
+  was released on a `y` typed before the payload was on screen.
+- **Why**: a terminal holds finished lines until the program reads them, and the
+  approval prompt takes the next line whenever it was typed. The shared stdin
+  reader (`src/input.rs`) keeps lines in order and reads only on request; it does
+  not know when a line was typed.
+- **Reach**: seen in plain `graffy chat` at a terminal, on a graph with an
+  approval gate. Plain `graffy run` uses the same prompt and was not tried. Piped
+  chat never approves. `chat --tui` decides gates with Ctrl chords, not typed
+  lines.
+- **Fix when picked up**: discard pending terminal input (`tcflush`) just before
+  the question is printed, or reject any line that arrived before it. Either
+  needs terminal control the plain path does not have today.
+- **Status**: recorded, not fixed. No test covers it.
 
 ## `graffy chat --tui`: not yet looked at on every terminal
 

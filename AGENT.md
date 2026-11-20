@@ -190,6 +190,8 @@ critical path.
   plain-terminal loop, and `graffy chat --tui` is the Ratatui conversation view.
   The view records an output receipt only after drawing the answer, and chat
   approvals need Ctrl chords (typing must never decide a gate) — keep both.
+  Plain chat and the plain approval prompt read stdin through one shared reader
+  (`src/input.rs`); a second reader on that path swallows typed lines (issue #35).
   Routing (ADR-0012): `chat --route` runs `graffy.builtin.router` as its own
   run (kind ROUTING — never a turn; keep it out of every history, exchange and
   execution-metric path, like rating runs). Graphs opt in with `route_on`;

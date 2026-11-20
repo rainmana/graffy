@@ -3,6 +3,7 @@
 //! Nothing — no prompt, no skill, no chat turn — executes outside an
 //! inspectable, durable, shareable agent graph. See docs/ARCHITECTURE.md.
 
+mod input;
 mod rating;
 mod turn;
 
@@ -667,7 +668,9 @@ async fn run_graph(
         started: turn_started,
         invoker,
         tools: tool_plane,
-        approvals: Arc::new(CliApprovalHandler),
+        approvals: Arc::new(CliApprovalHandler {
+            input: input::Lines::stdin(),
+        }),
         cancellation: cancellation.clone(),
         event_tap: None,
         routed_by: None,
@@ -945,9 +948,14 @@ async fn chat(
     let (tap, progress) = tokio::sync::mpsc::unbounded_channel();
     let mut progress = Some(progress);
     let interactive = std::io::stdin().is_terminal();
+    // One reader serves this loop and the approval prompt, so a line typed
+    // after a gate was abandoned reaches the chat instead of vanishing (#35).
+    let input = input::Lines::stdin();
     // Piped lines are conversation. Only a human at a terminal can approve.
     let approvals: Arc<dyn ApprovalHandler> = if interactive {
-        Arc::new(CliApprovalHandler)
+        Arc::new(CliApprovalHandler {
+            input: input.clone(),
+        })
     } else {
         Arc::new(PipedChatApprovals)
     };
@@ -957,18 +965,9 @@ async fn chat(
             print!("\nyou> ");
             std::io::stdout().flush()?;
         }
-        // ponytail: the approval prompt reads stdin from a detached thread; an
-        // approval abandoned by a deadline can swallow the next chat line
-        // (docs/KNOWN-ISSUES.md). One owned stdin reader fixes it if it bites.
-        let line = tokio::task::spawn_blocking(|| {
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).map(|n| (n, line))
-        })
-        .await??;
-        let (read, text) = line;
-        if read == 0 {
+        let Some(text) = input.next().await? else {
             break; // end of input: leave without sending anything
-        }
+        };
         let text = text.trim();
         if text.is_empty() {
             continue;
@@ -2361,7 +2360,9 @@ async fn doctor() -> anyhow::Result<()> {
 /// Plain-terminal approval parity (accessibility: every TUI capability has a
 /// non-TUI equivalent). Asks on stdin; empty input / EOF REJECTS, so piped or
 /// headless runs can never rubber-stamp a release gate.
-struct CliApprovalHandler;
+struct CliApprovalHandler {
+    input: input::Lines,
+}
 
 #[async_trait::async_trait]
 impl ApprovalHandler for CliApprovalHandler {
@@ -2381,23 +2382,17 @@ impl ApprovalHandler for CliApprovalHandler {
             if writeln!(output, "\napproval required at node '{node_id}': {question}\n[y]es approves; other input rejects. Edits must be submitted as a new correction turn.")
                 .and_then(|()| output.flush()).is_err() { return ApprovalOutcome::Abandoned; }
         }
-        // A detached input thread may outlive cancellation, but cannot keep the
-        // async runtime alive or release a later action.
-        let (send, receive) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let mut line = String::new();
-            let decision = match std::io::stdin().read_line(&mut line) {
-                Ok(0) | Err(_) => ApprovalOutcome::Abandoned,
-                Ok(_) if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") => {
-                    ApprovalOutcome::ApprovedInput(line.trim_end_matches(['\r', '\n']).to_owned())
-                }
-                Ok(_) => {
-                    ApprovalOutcome::RejectedInput(line.trim_end_matches(['\r', '\n']).to_owned())
-                }
-            };
-            let _ = send.send(decision);
-        });
-        receive.await.unwrap_or(ApprovalOutcome::Abandoned)
+        // If the turn is cancelled this wait is dropped. The shared reader then
+        // hands the next line to whoever asks next; it cannot decide this gate.
+        let Ok(Some(line)) = self.input.next().await else {
+            return ApprovalOutcome::Abandoned; // end of input or a read error
+        };
+        let observed = line.trim_end_matches(['\r', '\n']).to_owned();
+        if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            ApprovalOutcome::ApprovedInput(observed)
+        } else {
+            ApprovalOutcome::RejectedInput(observed)
+        }
     }
 }
 

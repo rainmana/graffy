@@ -206,6 +206,75 @@ fn piped_chat_lines_are_never_read_as_approvals() {
     }));
 }
 
+/// Issue #35. Approvals are only read from a terminal, so this drives the real
+/// binary inside a pseudo-terminal (`tests/fixture/pty_drive.py`, python3 —
+/// already required by the MCP fixture) and types what a human would.
+#[cfg(unix)]
+#[test]
+fn a_line_typed_after_an_abandoned_approval_is_the_next_chat_message() {
+    let h = Sandbox::new();
+    let driver = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixture/pty_drive.py");
+    let o = Command::new("python3")
+        .env("GRAFFY_HOME", &h.0)
+        .env_remove("GRAFFY_DATA_DIR")
+        .args([driver, "30", env!("CARGO_BIN_EXE_graffy")])
+        .args(["chat", "--offline", "--graph", GATED, "---"])
+        .args([
+            "expect=you> ",
+            "send=first\n",
+            // The gate is waiting on the human when Ctrl-C ends the turn.
+            "expect=approval required at node 'release'",
+            "interrupt",
+            "expect=you> ",
+            // Typed at the chat prompt: a message, not a late answer to the
+            // gate that was abandoned. Before the fix this line vanished.
+            "send=SECOND-MESSAGE\n",
+            "expect=approval required at node 'release'",
+            "send=y\n",
+            "expect==== reviewed response ====",
+            "expect=you> ",
+            "send=/quit\n",
+        ])
+        .output()
+        .expect("python3 runs the pseudo-terminal driver");
+    assert!(
+        o.status.success(),
+        "{}\n--- terminal transcript ---\n{}",
+        err(&o),
+        out(&o)
+    );
+
+    let runs = h.runs();
+    assert_eq!(runs.len(), 2, "each typed line is one turn");
+    let prompt = |events: &[wire::RunEvent]| {
+        events.iter().find_map(|e| match &e.event {
+            Some(Event::BoundaryEvent(b)) if b.actor == "human" && b.role == "prompt" => {
+                Some(b.content.clone())
+            }
+            _ => None,
+        })
+    };
+    let decisions = |events: &[wire::RunEvent]| -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Some(Event::BoundaryEvent(b)) if b.role == "approval_decision" => {
+                    Some(b.content.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    // The interrupted turn recorded no human decision and released nothing.
+    assert!(decisions(&runs[0].1).is_empty());
+    assert_eq!(delivered(&runs[0].1), 0);
+    // The next line ran as its own turn, and only the answer typed at that
+    // turn's own gate released it.
+    assert_eq!(prompt(&runs[1].1).as_deref(), Some("SECOND-MESSAGE"));
+    assert_eq!(decisions(&runs[1].1), ["y"]);
+    assert_eq!(delivered(&runs[1].1), 1);
+}
+
 #[test]
 fn resume_stays_on_the_sessions_graph() {
     let h = Sandbox::new();

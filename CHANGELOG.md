@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Chat approvals (issue #35):** in plain `graffy chat`, a line typed after an
+  approval prompt was abandoned (Ctrl-C or a deadline ended the turn) is now the
+  next chat message. Before, a leftover reader thread from the abandoned prompt
+  took that line and discarded it. Chat and the plain-terminal approval prompt
+  now share one stdin reader (`src/input.rs`) that hands each line to whichever of
+  them is waiting. A late line still never decides the abandoned gate.
 - **Chat TUI composer:** the message box has a cursor. `←` / `→`, `Home` / `End`,
   `Delete`, and `Ctrl-W` edit the draft anywhere, and paste lands at the cursor.
   Movement, deletion and wrapping work on grapheme clusters, so a joined emoji or
